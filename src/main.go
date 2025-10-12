@@ -86,6 +86,16 @@ func randomMeasId() string {
 	return strconv.FormatInt(rand.Int63n(1e16)+1e15, 10)
 }
 
+// Helper to format bytes for display
+func formatBytes(bytes int) string {
+	if bytes >= 1000000 {
+		return fmt.Sprintf("%.0fMB", float64(bytes)/1000000)
+	} else if bytes >= 1000 {
+		return fmt.Sprintf("%.0fkB", float64(bytes)/1000)
+	}
+	return fmt.Sprintf("%dB", bytes)
+}
+
 func request(method, path string, data []byte) (start, ttfb, end, uploadDone time.Time, serverProc float64, err error) {
 	url := "https://speed.cloudflare.com" + path
 	client := &http.Client{}
@@ -189,13 +199,13 @@ func upload(bytes int) (speedMbps float64, err error) {
 	url := fmt.Sprintf("https://speed.cloudflare.com/__up?measId=%s", measId)
 
 	client := resty.New()
-	client.SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
+	client.SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 	client.SetHeader("Content-Type", "text/plain;charset=UTF-8")
 	client.SetHeader("Origin", "https://speed.cloudflare.com")
-	client.SetHeader("Referer", "https://speed.cloudflare.com/")
-	client.SetHeader("Cookie", "__cf_bm=iOwYiF1JWEK8K.i5pzLDW7ZhadIRHivZZnDQRYI6ZgQ-1746589389-1.0.1.1-rwOAZVeBAn8JzALtyoLT.sLcLLYLoKlFkxQUbsSe7qecbL4DABzT8KvmBPfvZhq.1I431uXw7GH7Y6iTFcqotS34KI_bFmzwUlBVIFlssYKBTRv_ArFhJmmsRYZpUrai; __cf_logged_in=1; _cfms_willow=enable")
+	// client.SetHeader("Referer", "https://speed.cloudflare.com/")
+	// client.SetHeader("Cookie", "__cf_bm=iOwYiF1JWEK8K.i5pzLDW7ZhadIRHivZZnDQRYI6ZgQ-1746589389-1.0.1.1-rwOAZVeBAn8JzALtyoLT.sLcLLYLoKlFkxQUbsSe7qecbL4DABzT8KvmBPfvZhq.1I431uXw7GH7Y6iTFcqotS34KI_bFmzwUlBVIFlssYKBTRv_ArFhJmmsRYZpUrai; __cf_logged_in=1; _cfms_willow=enable")
 	// Add browser-like headers
-	client.SetHeader("sec-ch-ua", `"Chromium";v="136", "Brave";v="136", "Not.A/Brand";v="99"`)
+	client.SetHeader("sec-ch-ua", `"Chromium";v="141", "Brave";v="141", "Not.A/Brand";v="99"`)
 	client.SetHeader("sec-ch-ua-mobile", "?0")
 	client.SetHeader("sec-ch-ua-platform", `"macOS"`)
 	client.SetHeader("upgrade-insecure-requests", "1")
@@ -245,11 +255,22 @@ func measureLatency() ([]float64, error) {
 func measureDownload(bytes, iterations int) ([]float64, error) {
 	measurements := []float64{}
 	for i := 0; i < iterations; i++ {
+		start := time.Now()
 		_, speed, err := download(bytes)
+		elapsed := time.Since(start)
+
 		if err != nil {
 			fmt.Println("Error:", err)
 			continue
 		}
+
+		// Skip if test takes longer than 5 seconds
+		if elapsed > 5*time.Second {
+			fmt.Printf("Skipping remaining %s download tests (took %.2fs)\n",
+				formatBytes(bytes), elapsed.Seconds())
+			break
+		}
+
 		measurements = append(measurements, speed)
 	}
 	return measurements, nil
@@ -258,11 +279,22 @@ func measureDownload(bytes, iterations int) ([]float64, error) {
 func measureUpload(bytes, iterations int) ([]float64, error) {
 	measurements := []float64{}
 	for i := 0; i < iterations; i++ {
+		start := time.Now()
 		speed, err := upload(bytes)
+		elapsed := time.Since(start)
+
 		if err != nil {
 			fmt.Println("Error:", err)
 			continue
 		}
+
+		// Skip if test takes longer than 20 seconds
+		if elapsed > 20*time.Second {
+			fmt.Printf("Skipping remaining %s upload tests (took %.2fs)\n",
+				formatBytes(bytes), elapsed.Seconds())
+			break
+		}
+
 		measurements = append(measurements, speed)
 	}
 	return measurements, nil
@@ -278,6 +310,10 @@ func logLatency(data []float64) {
 }
 
 func logSpeedTestResult(size string, test []float64) {
+	if len(test) == 0 {
+		fmt.Println(Bold(fmt.Sprintf("%s %s speed: %s", strings.Repeat(" ", 9-len(size)), size, Yellow("Skipped"))))
+		return
+	}
 	speed := median(test)
 	fmt.Println(Bold(fmt.Sprintf("%s %s speed: %s Mbps", strings.Repeat(" ", 9-len(size)), size, Yellow(fmt.Sprintf("%.2f", speed)))))
 }
@@ -287,7 +323,7 @@ func logDownloadSpeed(tests []float64) {
 		fmt.Println("  Download speed: N/A")
 		return
 	}
-	fmt.Println(Bold("  Download speed:", Green(fmt.Sprintf("%.2f Mbps", quartile(tests, 0.9)))))
+	fmt.Println(Bold("  Download speed:", Green(fmt.Sprintf("%.2f Mbps", median(tests)))))
 }
 
 func logUploadSpeed(tests []float64) {
@@ -295,7 +331,7 @@ func logUploadSpeed(tests []float64) {
 		fmt.Println("    Upload speed: N/A")
 		return
 	}
-	fmt.Println(Bold("    Upload speed:", Green(fmt.Sprintf("%.2f Mbps", quartile(tests, 0.9)))))
+	fmt.Println(Bold("    Upload speed:", Green(fmt.Sprintf("%.2f Mbps", median(tests)))))
 }
 
 func main() {
@@ -350,38 +386,28 @@ func main() {
 	}
 
 	if testDownload {
-		testDown1, _ := measureDownload(101000, 10)
+		testDown1, _ := measureDownload(100000, 10)
 		logSpeedTestResult("100kB", testDown1)
-		testDown2, _ := measureDownload(1001000, 8)
+		testDown2, _ := measureDownload(1000000, 8)
 		logSpeedTestResult("1MB", testDown2)
-		testDown3, _ := measureDownload(10001000, 6)
+		testDown3, _ := measureDownload(10000000, 6)
 		logSpeedTestResult("10MB", testDown3)
 		if !(liteMode || liteDownload) {
-			testDown4, _ := measureDownload(25001000, 4)
-			logSpeedTestResult("100MB", testDown4)
-			downloadTests := append(append(append(testDown1, testDown2...), testDown3...), testDown4...)
-			logDownloadSpeed(downloadTests)
-		} else {
-			downloadTests := append(append(testDown1, testDown2...), testDown3...)
-			logDownloadSpeed(downloadTests)
+			testDown4, _ := measureDownload(25000000, 4)
+			logSpeedTestResult("25MB", testDown4)
 		}
 	}
 
 	if testUpload {
-		testUp1, _ := measureUpload(11000, 10)
+		testUp1, _ := measureUpload(10000, 10)
 		logSpeedTestResult("10kB", testUp1)
-		testUp2, _ := measureUpload(1001000, 8)
+		testUp2, _ := measureUpload(1000000, 8)
 		logSpeedTestResult("1MB", testUp2)
-		testUp3, _ := measureUpload(10001000, 6)
+		testUp3, _ := measureUpload(10000000, 6)
 		logSpeedTestResult("10MB", testUp3)
 		if !(liteMode || liteUpload) {
-			testUp4, _ := measureUpload(25001000, 4)
-			logSpeedTestResult("100MB", testUp4)
-			uploadTests := append(append(append(testUp1, testUp2...), testUp3...), testUp4...)
-			logUploadSpeed(uploadTests)
-		} else {
-			uploadTests := append(append(testUp1, testUp2...), testUp3...)
-			logUploadSpeed(uploadTests)
+			testUp4, _ := measureUpload(25000000, 4)
+			logSpeedTestResult("25MB", testUp4)
 		}
 	}
 }

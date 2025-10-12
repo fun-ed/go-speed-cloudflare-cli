@@ -1,12 +1,12 @@
 # --- Build stage (Alpine) ---
-FROM golang:1.24-alpine AS builder-alpine
+FROM golang:1.25-alpine AS builder-alpine
 WORKDIR /app
 COPY src/ .
 RUN go mod tidy
 RUN go build -ldflags="-s -w" -o main .
 
 # --- Build stage (Debian-slim) ---
-FROM bitnami/golang:1.24-debian-12 AS builder-slim
+FROM bitnami/golang:1.25-debian-13 AS builder-slim
 WORKDIR /app
 COPY src/ .
 RUN go mod tidy

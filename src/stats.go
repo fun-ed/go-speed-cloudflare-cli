@@ -14,6 +14,9 @@ func average(values []float64) float64 {
 }
 
 func median(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
 	sorted := make([]float64, len(values))
 	copy(sorted, values)
 	sort.Float64s(sorted)

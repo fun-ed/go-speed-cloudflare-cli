@@ -64,7 +64,15 @@ docker run -it --rm nrt.vultrcr.com/edoo/go-speed-cloudflare-cli:alpine
 cd src
 go mod init
 go mod tidy
-go build -ldflags="-s -w" -o go-speed-cloudflare-cli .
+
+## Build for linux x86_64
+GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../go-speed-cloudflare-cli-linux-amd64 .
+
+## Build for darwin x86_64
+GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o ../go-speed-cloudflare-cli-darwin-amd64 .
+
+## Build for windows x86_64
+GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../go-speed-cloudflare-cli-windows-amd64.exe .
 ```
 
 #### Alpine
@@ -85,6 +93,4 @@ docker build --target final-slim -t nrt.vultrcr.com/edoo/go-speed-cloudflare-cli
 git config --local user.name "zoonderkins"
 
 git config --local user.email "xxxx@xxx.com"
-
 ```
-
