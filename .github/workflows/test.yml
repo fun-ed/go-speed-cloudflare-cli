@@ -2,36 +2,28 @@ name: Test
 
 on:
   push:
-    branches: [dev]
+    branches: ['**']
   pull_request:
-    branches: [dev]
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7.0.0
         with:
-          go-version: '1.24'
-          check-latest: true
-
-      - name: Get dependencies
-        run: |
-          cd src
-          go mod download
+          go-version-file: src/go.mod
 
       - name: Run tests
-        run: |
-          cd src
-          go test -v ./...
+        working-directory: src
+        run: go test -v ./...
 
       - name: Run linting
-        uses: golangci/golangci-lint-action@v3
+        uses: golangci/golangci-lint-action@v9.3.0
         with:
-          version: latest
+          version: v2.14.0
           working-directory: src
-          args: --timeout=5m 
+          args: --timeout=5m

@@ -1,16 +1,24 @@
 # --- Build stage (Alpine) ---
-FROM golang:1.25-alpine AS builder-alpine
+FROM golang:1.26-alpine AS builder-alpine
 WORKDIR /app
 COPY src/ .
-RUN go mod tidy
-RUN go build -ldflags="-s -w" -o main .
+ARG VERSION
+RUN ldflags="-s -w"; \
+    if [ -n "$VERSION" ]; then \
+      ldflags="$ldflags -X main.version=$VERSION"; \
+    fi; \
+    go build -ldflags="$ldflags" -o main .
 
 # --- Build stage (Debian-slim) ---
-FROM bitnami/golang:1.25-debian-13 AS builder-slim
+FROM golang:1.26-trixie AS builder-slim
 WORKDIR /app
 COPY src/ .
-RUN go mod tidy
-RUN go build -ldflags="-s -w" -o main .
+ARG VERSION
+RUN ldflags="-s -w"; \
+    if [ -n "$VERSION" ]; then \
+      ldflags="$ldflags -X main.version=$VERSION"; \
+    fi; \
+    go build -ldflags="$ldflags" -o main .
 
 # --- Final image (Alpine) ---
 FROM alpine:3 AS final-alpine

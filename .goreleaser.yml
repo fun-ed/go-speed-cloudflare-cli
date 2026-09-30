@@ -1,12 +1,11 @@
-before:
-  hooks:
-    - go mod tidy
+version: 2
 
 builds:
-  - main: ./src
+  - id: go-speed-cloudflare-cli
+    main: .
     binary: go-speed-cloudflare-cli
     ldflags:
-      - -s -w
+      - -s -w -X main.version={{ .Version }}
     env:
       - CGO_ENABLED=0
     goos:
@@ -21,14 +20,16 @@ builds:
         goarch: arm64
 
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_
       {{- if eq .Os "darwin" }}macOS{{- else }}{{ .Os }}{{ end }}_
       {{- .Arch }}
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
 
 changelog:
   sort: asc
@@ -39,10 +40,3 @@ changelog:
       - '^ci:'
       - Merge pull request
       - Merge branch
-
-release:
-  github:
-    owner: "{{ .Env.GITHUB_REPOSITORY_OWNER }}"
-    name: "{{ .Env.GITHUB_REPOSITORY }}"
-  draft: false
-  prerelease: auto 

@@ -1,90 +1,130 @@
 package main
 
 import (
+	"math"
 	"testing"
+	"time"
 )
 
-// For testing, we use a different approach than trying to mock the network calls
-// Instead, we'll test the functions that process the results
-
-func TestQuartileOnDownloadResults(t *testing.T) {
-	// Sample download data representing speed test results in Mbps
-	testData := []float64{
-		50.2, 55.1, 52.8, 51.9, 53.7, 58.2, 49.8, 54.3, 53.0, 56.1,
+func TestBandwidthReducerPoolsEligibleFiniteSamples(t *testing.T) {
+	values := []float64{50.2, 55.1, 52.8, 51.9, 53.7, 58.2, 49.8, 54.3, 53.0, 56.1}
+	samples := make([]sample, 0, len(values)+3)
+	for _, speed := range values {
+		samples = append(samples, sample{SpeedBps: speed, DurationMs: 10})
 	}
-
-	// Test median
-	medianSpeed := median(testData)
-	expectedMedian := 53.35 // Calculated manually: (53.0 + 53.7) / 2
-	if abs(medianSpeed-expectedMedian) > 0.01 {
-		t.Errorf("median speed = %f, expected %f", medianSpeed, expectedMedian)
+	samples = append(samples,
+		sample{SpeedBps: 999, DurationMs: 9.99},
+		sample{SpeedBps: math.NaN(), DurationMs: 20},
+		sample{SpeedBps: math.Inf(1), DurationMs: 20},
+	)
+	before := append([]sample(nil), samples...)
+	got, ok := bandwidthBps(samples)
+	if !ok || math.Abs(got-56.31) > 1e-12 {
+		t.Fatalf("bandwidthBps = %g, %v; want 56.31, true", got, ok)
 	}
-
-	// Test quartile for 90th percentile (what we display as final speed)
-	q90Speed := quartile(testData, 0.90)
-	expectedQ90 := 57.4                  // Manually calculated 90th percentile
-	if abs(q90Speed-expectedQ90) > 0.3 { // Allow a bit more tolerance due to interpolation
-		t.Errorf("90th percentile speed = %f, expected approximately %f", q90Speed, expectedQ90)
-	}
-}
-
-func TestAppendingDownloadTests(t *testing.T) {
-	// This tests how we combine the test results from different download sizes
-	test1 := []float64{10.1, 10.2, 10.3} // 100kB
-	test2 := []float64{20.1, 20.2}       // 1MB
-	test3 := []float64{30.1}             // 10MB
-	test4 := []float64{40.1, 40.2}       // 100MB
-
-	// Test how the results are combined as in the main function
-	allTests := append(append(append(test1, test2...), test3...), test4...)
-
-	// Check result counts
-	if len(allTests) != 8 {
-		t.Errorf("expected 8 combined results, got %d", len(allTests))
-	}
-
-	// Check the values are included correctly
-	expectedValues := []float64{10.1, 10.2, 10.3, 20.1, 20.2, 30.1, 40.1, 40.2}
-	for i, val := range expectedValues {
-		if abs(allTests[i]-val) > 0.01 {
-			t.Errorf("at position %d: expected %f, got %f", i, val, allTests[i])
+	for i := range samples {
+		current, previous := samples[i], before[i]
+		if math.Float64bits(current.SpeedBps) != math.Float64bits(previous.SpeedBps) {
+			t.Fatalf("bandwidth reducer changed sample %d speed", i)
+		}
+		current.SpeedBps, previous.SpeedBps = 0, 0
+		if current != previous {
+			t.Fatalf("bandwidth reducer changed sample %d", i)
 		}
 	}
-}
-
-func TestSpeedLogging(t *testing.T) {
-	// This is a simple test to ensure the logic for lite mode is correct
-	fullModeTests := []float64{10.1, 20.2, 30.3, 40.4}
-	liteModeTests := []float64{10.1, 20.2, 30.3}
-
-	// In full mode, with 4 sizes of tests, we should have all values
-	if len(fullModeTests) != 4 {
-		t.Errorf("expected 4 tests in full mode, got %d", len(fullModeTests))
-	}
-
-	// In lite mode, with 3 sizes of tests, we should have 3 values
-	if len(liteModeTests) != 3 {
-		t.Errorf("expected 3 tests in lite mode, got %d", len(liteModeTests))
-	}
-
-	// Check the behavior of quartile function on these arrays
-	fullSpeed := quartile(fullModeTests, 0.9)
-	expectedFullSpeed := 38.39 // Calculated manually
-	if abs(fullSpeed-expectedFullSpeed) > 0.1 {
-		t.Errorf("full mode speed = %f, expected approximately %f", fullSpeed, expectedFullSpeed)
-	}
-
-	liteSpeed := quartile(liteModeTests, 0.9)
-	expectedLiteSpeed := 29.07 // Calculated manually
-	if abs(liteSpeed-expectedLiteSpeed) > 0.1 {
-		t.Errorf("lite mode speed = %f, expected approximately %f", liteSpeed, expectedLiteSpeed)
+	if got, ok := bandwidthBps([]sample{{SpeedBps: 10, DurationMs: 9.999}}); ok || got != 0 {
+		t.Fatalf("short-only bucket = %g, %v; want 0, false", got, ok)
 	}
 }
 
-// Helper function for floating point comparison
-func abs(x float64) float64 {
-	if x < 0 {
-		return -x
+func TestLatencyReducerPreservesChronologicalJitterOrder(t *testing.T) {
+	samples := []sample{
+		{LatencyMs: 1},
+		{LatencyMs: 4},
+		{LatencyMs: math.NaN()},
+		{LatencyMs: 2},
+		{LatencyMs: math.Inf(1)},
 	}
-	return x
+	latency, jitter, latencyOK, jitterOK := latencyStats(samples)
+	if !latencyOK || !jitterOK || latency != 2 || jitter != 2.5 {
+		t.Fatalf("latencyStats = %g, %g, %v, %v", latency, jitter, latencyOK, jitterOK)
+	}
+	if _, _, latencyOK, jitterOK := latencyStats(nil); latencyOK || jitterOK {
+		t.Fatalf("empty latency stats marked valid: latency=%v jitter=%v", latencyOK, jitterOK)
+	}
+	if _, _, latencyOK, jitterOK := latencyStats([]sample{{LatencyMs: 5}}); !latencyOK || jitterOK {
+		t.Fatalf("single ping validity: latency=%v jitter=%v", latencyOK, jitterOK)
+	}
+}
+
+func TestLoadedLatencyUsesEligibleBucketsAndLatestChronologicalPoints(t *testing.T) {
+	start := time.Unix(100, 0)
+	results := []phaseResult{
+		{
+			Phase:         phase{Direction: measurementDownload, Bytes: 100_000},
+			Samples:       []sample{{DurationMs: 300}},
+			LoadedLatency: []sample{{LatencyMs: 999, Started: start.Add(time.Minute)}},
+		},
+		{
+			Phase:   phase{Direction: measurementDownload, Bytes: 100_000},
+			Samples: []sample{{DurationMs: 249}},
+			LoadedLatency: []sample{
+				{LatencyMs: 998, Started: start.Add(2 * time.Minute)},
+			},
+		},
+		{
+			Phase:   phase{Direction: measurementDownload, Bytes: 200_000},
+			Samples: []sample{{DurationMs: 300}},
+			LoadedLatency: []sample{
+				{LatencyMs: 20, Started: start.Add(20 * time.Second)},
+				{LatencyMs: 0, Started: start},
+			},
+		},
+		{
+			Phase:   phase{Direction: measurementDownload, Bytes: 1_000_000},
+			Samples: []sample{{DurationMs: 249}},
+			LoadedLatency: []sample{
+				{LatencyMs: 997, Started: start.Add(3 * time.Minute)},
+			},
+		},
+		{
+			Phase:         phase{Direction: measurementUpload, Bytes: 100_000},
+			Samples:       []sample{{DurationMs: 500}},
+			LoadedLatency: []sample{{LatencyMs: 500, Started: start.Add(time.Hour)}},
+		},
+	}
+	for index := 19; index >= 1; index-- {
+		results[2].LoadedLatency = append(results[2].LoadedLatency, sample{
+			LatencyMs: float64(index),
+			Started:   start.Add(time.Duration(index) * time.Second),
+		})
+	}
+	latency, jitter, latencyOK, jitterOK := loadedLatencyStats(results, measurementDownload)
+	if !latencyOK || !jitterOK || latency != 10.5 || jitter != 1 {
+		t.Fatalf("loaded stats = %g, %g, %v, %v", latency, jitter, latencyOK, jitterOK)
+	}
+}
+
+func TestShouldFinishRequiresAllSuccessfulSamplesOverThreshold(t *testing.T) {
+	result := phaseResult{
+		Phase: phase{Direction: measurementDownload, Bytes: 100_000},
+		Samples: []sample{
+			{DurationMs: 1500},
+			{DurationMs: 1001},
+		},
+	}
+	if !shouldFinish(result) {
+		t.Fatal("slow completed phase should finish this direction")
+	}
+	result.Samples = append(result.Samples, sample{DurationMs: 1000})
+	if shouldFinish(result) {
+		t.Fatal("a phase with a 1000ms minimum must not finish")
+	}
+	result.Phase.BypassFinish = true
+	if shouldFinish(result) {
+		t.Fatal("bypass phase must not finish")
+	}
+	if shouldFinish(phaseResult{Phase: phase{Direction: measurementDownload}}) {
+		t.Fatal("empty phase must not finish")
+	}
 }

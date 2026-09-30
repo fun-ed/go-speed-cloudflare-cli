@@ -1,20 +1,29 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"math/rand"
+	"net"
 	"net/http"
-	"net/http/httptrace"
-	"strconv"
+	"net/url"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/go-resty/resty/v2"
+	"golang.org/x/term"
 )
+
+var version = "0.1.0"
+
+const chromeMajorVersion = "154"
+const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + chromeMajorVersion + ".0.0.0 Safari/537.36"
+const cloudflareBaseURL = "https://speed.cloudflare.com"
 
 type CfTrace struct {
 	IP   string
@@ -27,387 +36,470 @@ type Location struct {
 	City string `json:"city"`
 }
 
-const version = "0.0.1"
-
-func get(hostname, path string) ([]byte, error) {
-	url := "https://" + hostname + path
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+type cliOptions struct {
+	download      bool
+	upload        bool
+	lite          bool
+	liteDownload  bool
+	liteUpload    bool
+	showVersion   bool
+	loadedLatency bool
+	packetLoss    bool
+	turnCredsURL  string
+	turnServer    string
+	noProgress    bool
+	noColor       bool
+	timeout       time.Duration
 }
 
-func fetchServerLocationData() (map[string]string, error) {
-	body, err := get("speed.cloudflare.com", "/locations")
-	if err != nil {
-		return nil, err
-	}
-	var locations []Location
-	err = json.Unmarshal(body, &locations)
-	if err != nil {
-		return nil, err
-	}
-	m := make(map[string]string)
-	for _, loc := range locations {
-		m[loc.IATA] = loc.City
-	}
-	return m, nil
+type cliConfig struct {
+	baseURL    string
+	phases     []phase
+	packetLoss func(context.Context, *http.Client, packetLossConfig, func(int)) packetLossResult
 }
 
-func fetchCfCdnCgiTrace() (CfTrace, error) {
-	body, err := get("speed.cloudflare.com", "/cdn-cgi/trace")
-	if err != nil {
-		return CfTrace{}, err
+func parseOptions(args []string, stderr io.Writer) (cliOptions, error) {
+	var opts cliOptions
+	flags := flag.NewFlagSet("go-speed-cloudflare-cli", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.BoolVar(&opts.download, "download", false, "Test download speed only")
+	flags.BoolVar(&opts.upload, "upload", false, "Test upload speed only")
+	flags.BoolVar(&opts.lite, "lite", false, "Limit selected directions to requests up to 10MB, not total traffic")
+	flags.BoolVar(&opts.liteDownload, "lite-download", false, "Select lite download unless directions are explicitly selected")
+	flags.BoolVar(&opts.liteUpload, "lite-upload", false, "Select lite upload unless directions are explicitly selected")
+	flags.BoolVar(&opts.showVersion, "version", false, "Show version without network activity")
+	flags.BoolVar(&opts.loadedLatency, "loaded-latency", true, "Measure latency during bandwidth transfers")
+	flags.BoolVar(&opts.packetLoss, "packet-loss", true, "Measure WebRTC message loss through UDP TURN relay")
+	flags.StringVar(&opts.turnCredsURL, "turn-creds-url", "", "Override TURN credentials endpoint, using username/credential plus server or UDP urls")
+	flags.StringVar(&opts.turnServer, "turn-server", "", "Fallback TURN host:port when the credentials response has no server or urls")
+	flags.BoolVar(&opts.noProgress, "no-progress", false, "Disable terminal progress on stderr")
+	flags.BoolVar(&opts.noColor, "no-color", false, "Disable terminal colors")
+	flags.DurationVar(&opts.timeout, "timeout", 30*time.Second, "Whole-request deadline, including 429 retry waits")
+	if err := flags.Parse(args); err != nil {
+		return opts, err
 	}
-	lines := strings.Split(string(body), "\n")
-	trace := CfTrace{}
-	for _, line := range lines {
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
+	if flags.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if opts.showVersion {
+		return opts, nil
+	}
+	if opts.timeout <= 0 {
+		return opts, errors.New("timeout must be greater than zero")
+	}
+	if opts.turnCredsURL != "" {
+		endpoint, err := url.Parse(opts.turnCredsURL)
+		if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+			return opts, errors.New("TURN credentials URL must be an absolute HTTP(S) URL without user information or fragment")
 		}
-		switch parts[0] {
-		case "ip":
-			trace.IP = parts[1]
-		case "loc":
-			trace.Loc = parts[1]
-		case "colo":
-			trace.Colo = parts[1]
+	}
+	directionSpecified := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "download" || f.Name == "upload" {
+			directionSpecified = true
 		}
-	}
-	return trace, nil
-}
-
-// Helper to generate a random measId
-func randomMeasId() string {
-	rand.Seed(time.Now().UnixNano())
-	return strconv.FormatInt(rand.Int63n(1e16)+1e15, 10)
-}
-
-// Helper to format bytes for display
-func formatBytes(bytes int) string {
-	if bytes >= 1000000 {
-		return fmt.Sprintf("%.0fMB", float64(bytes)/1000000)
-	} else if bytes >= 1000 {
-		return fmt.Sprintf("%.0fkB", float64(bytes)/1000)
-	}
-	return fmt.Sprintf("%dB", bytes)
-}
-
-func request(method, path string, data []byte) (start, ttfb, end, uploadDone time.Time, serverProc float64, err error) {
-	url := "https://speed.cloudflare.com" + path
-	client := &http.Client{}
-	var req *http.Request
-	if data != nil {
-		req, err = http.NewRequest(method, url, bytes.NewReader(data))
+	})
+	if directionSpecified {
+		if !opts.download && !opts.upload {
+			return opts, errors.New("at least one direction must be selected")
+		}
+	} else if opts.liteDownload || opts.liteUpload {
+		opts.download, opts.upload = opts.liteDownload, opts.liteUpload
 	} else {
-		req, err = http.NewRequest(method, url, nil)
+		opts.download, opts.upload = true, true
 	}
-	if err != nil {
-		return
+	if opts.liteDownload && !opts.download {
+		return opts, errors.New("-lite-download requires download to be selected")
 	}
-	// Set User-Agent to Mac Chrome
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
-	if data != nil && method == "POST" && strings.HasPrefix(path, "/__up") {
-		req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
-		req.Header.Set("Content-Length", strconv.Itoa(len(data)))
-		req.Header.Set("Origin", "https://speed.cloudflare.com")
-		req.Header.Set("Referer", "https://speed.cloudflare.com/")
+	if opts.liteUpload && !opts.upload {
+		return opts, errors.New("-lite-upload requires upload to be selected")
 	}
-	start = time.Now()
+	return opts, nil
+}
 
-	// Use httptrace to track when the last byte is written (for upload)
-	if data != nil && method == "POST" && strings.HasPrefix(path, "/__up") {
-		var wroteRequestDone time.Time
-		trace := &httptrace.ClientTrace{
-			WroteRequest: func(info httptrace.WroteRequestInfo) {
-				wroteRequestDone = time.Now()
-			},
-		}
-		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-		resp, err2 := client.Do(req)
-		if err2 != nil {
-			err = err2
-			return
-		}
-		defer resp.Body.Close()
-		buf := make([]byte, 1)
-		_, err = resp.Body.Read(buf) // Read first byte
-		if err != nil && err != io.EOF {
-			return
-		}
-		ttfb = time.Now()
-		io.Copy(io.Discard, resp.Body)
-		end = time.Now()
-		uploadDone = wroteRequestDone
-		// Server-Timing header parsing
-		serverTiming := resp.Header.Get("Server-Timing")
-		if strings.Contains(serverTiming, ";dur=") {
-			parts := strings.Split(serverTiming, ";dur=")
-			if len(parts) > 1 {
-				serverProc, _ = strconv.ParseFloat(parts[1], 64)
+func defaultTestPhases() []phase {
+	httpPlan := defaultPhases()
+	plan := make([]phase, 0, len(httpPlan)+1)
+	plan = append(plan, httpPlan[:9]...)
+	plan = append(plan, phase{Direction: "packetloss", Count: 1})
+	return append(plan, httpPlan[9:]...)
+}
+
+func selectedPhases(plan []phase, opts cliOptions) []phase {
+	selected := make([]phase, 0, len(plan))
+	for _, p := range plan {
+		switch p.Direction {
+		case "download":
+			if !opts.download || (opts.lite || opts.liteDownload) && p.Bytes > 10000000 {
+				continue
+			}
+		case "upload":
+			if !opts.upload || (opts.lite || opts.liteUpload) && p.Bytes > 10000000 {
+				continue
+			}
+		case "packetloss":
+			if !opts.packetLoss {
+				continue
 			}
 		}
-		return
+		selected = append(selected, p)
 	}
-
-	// For non-upload requests, behave as before
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	buf := make([]byte, 1)
-	_, err = resp.Body.Read(buf) // Read first byte
-	if err != nil && err != io.EOF {
-		return
-	}
-	ttfb = time.Now()
-	io.Copy(io.Discard, resp.Body)
-	end = time.Now()
-	// Server-Timing header parsing
-	serverTiming := resp.Header.Get("Server-Timing")
-	if strings.Contains(serverTiming, ";dur=") {
-		parts := strings.Split(serverTiming, ";dur=")
-		if len(parts) > 1 {
-			serverProc, _ = strconv.ParseFloat(parts[1], 64)
-		}
-	}
-	return
+	return selected
 }
 
-func download(bytes int) (latencyMs, speedMbps float64, err error) {
-	start, ttfb, end, _, serverProc, err := request("GET", fmt.Sprintf("/__down?bytes=%d", bytes), nil)
-	if err != nil {
+func directionLabel(direction string) string {
+	switch direction {
+	case "download":
+		return "Download"
+	case "upload":
+		return "Upload"
+	default:
+		return "Latency"
+	}
+}
+
+func formatBytes(size int) string {
+	switch {
+	case size >= 1000000:
+		return fmt.Sprintf("%gMB", float64(size)/1000000)
+	case size >= 1000:
+		return fmt.Sprintf("%gkB", float64(size)/1000)
+	default:
+		return fmt.Sprintf("%dB", size)
+	}
+}
+
+func isTerminal(writer io.Writer) bool {
+	file, ok := writer.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+
+type textUI struct {
+	stdout   io.Writer
+	stderr   io.Writer
+	progress bool
+	color    bool
+	done     int
+	total    int
+}
+
+func (ui *textUI) clearProgress() {
+	if ui.progress {
+		_, _ = fmt.Fprint(ui.stderr, "\r\033[K")
+	}
+}
+
+func (ui *textUI) advance(units int, label string) {
+	ui.done += units
+	if ui.done > ui.total {
+		ui.done = ui.total
+	}
+	if !ui.progress || ui.total == 0 {
 		return
 	}
-	latencyMs = ttfb.Sub(start).Seconds()*1000 - serverProc
-	transferTime := end.Sub(ttfb).Seconds()
-	if transferTime > 0 {
-		speedMbps = float64(bytes*8) / transferTime / 1e6
+	percent := 100 * ui.done / ui.total
+	filled := 20 * ui.done / ui.total
+	_, _ = fmt.Fprintf(ui.stderr, "\r\033[K[%s%s] %3d%% work %d/%d | %s", strings.Repeat("#", filled), strings.Repeat("-", 20-filled), percent, ui.done, ui.total, label)
+}
+
+func (ui *textUI) warning(format string, args ...any) {
+	ui.clearProgress()
+	_, _ = fmt.Fprintf(ui.stderr, "Warning: "+format+"\n", args...)
+}
+
+func (ui *textUI) heading(text string) {
+	ui.clearProgress()
+	if ui.color {
+		text = Bold(text)
+	}
+	_, _ = fmt.Fprintln(ui.stdout, text)
+}
+
+func (ui *textUI) metric(label string, value float64, ok bool, unit string) {
+	ui.clearProgress()
+	if !ok {
+		_, _ = fmt.Fprintf(ui.stdout, "%s: N/A\n", label)
+		return
+	}
+	formatted := fmt.Sprintf("%.2f %s", value, unit)
+	if ui.color {
+		formatted = Green(formatted)
+	}
+	_, _ = fmt.Fprintf(ui.stdout, "%s: %s\n", label, formatted)
+}
+
+func (ui *textUI) phaseResult(result phaseResult) {
+	if result.Phase.Direction == "latency" {
+		return
+	}
+	ui.clearProgress()
+	label := fmt.Sprintf("%s %s median", directionLabel(result.Phase.Direction), formatBytes(result.Phase.Bytes))
+	values := make([]float64, 0, len(result.Samples))
+	for _, s := range result.Samples {
+		if s.SpeedBps > 0 && s.DurationMs >= 10 {
+			values = append(values, s.SpeedBps/1e6)
+		}
+	}
+	if len(values) == 0 {
+		_, _ = fmt.Fprintf(ui.stdout, "%s: N/A (%d/%d successful attempts)\n", label, len(result.Samples), result.Attempts)
+		return
+	}
+	_, _ = fmt.Fprintf(ui.stdout, "%s: %.2f Mbps (%d/%d valid samples)\n", label, median(values), len(values), result.Attempts)
+}
+
+func fetchBody(ctx context.Context, client *measurementClient, path string, timeout time.Duration) (body []byte, err error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(client.baseURL, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json, text/plain;q=0.9")
+	resp, err := client.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = errors.Join(err, resp.Body.Close())
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%s returned HTTP %d", path, resp.StatusCode)
+	}
+	const limit = 2 * 1024 * 1024
+	body, err = io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > limit {
+		return nil, fmt.Errorf("%s response exceeds %d bytes", path, limit)
+	}
+	return body, nil
+}
+
+func showMetadata(ctx context.Context, client *measurementClient, opts cliOptions, ui *textUI) {
+	cities := make(map[string]string)
+	body, err := fetchBody(ctx, client, "/locations", opts.timeout)
+	if err == nil {
+		var locations []Location
+		err = json.Unmarshal(body, &locations)
+		for _, location := range locations {
+			cities[location.IATA] = location.City
+		}
+	}
+	if err != nil {
+		ui.warning("server locations unavailable: %v", err)
+	}
+	ui.advance(1, "server locations")
+	body, err = fetchBody(ctx, client, "/cdn-cgi/trace", opts.timeout)
+	var trace CfTrace
+	if err == nil {
+		for _, line := range strings.Split(string(body), "\n") {
+			key, value, found := strings.Cut(line, "=")
+			if !found {
+				continue
+			}
+			switch key {
+			case "ip":
+				trace.IP = value
+			case "loc":
+				trace.Loc = value
+			case "colo":
+				trace.Colo = value
+			}
+		}
+		if net.ParseIP(trace.IP) == nil || trace.Loc == "" || trace.Colo == "" {
+			err = errors.New("trace response is missing valid ip, loc or colo")
+		}
+	}
+	ui.clearProgress()
+	if err != nil {
+		ui.warning("connection metadata unavailable: %v", err)
+		_, _ = fmt.Fprintln(ui.stdout, "Server location: N/A\nYour IP: N/A")
 	} else {
-		speedMbps = 0
+		city := cities[trace.Colo]
+		if city == "" {
+			city = "Unknown city"
+		}
+		_, _ = fmt.Fprintf(ui.stdout, "Server location: %s (%s)\nYour IP: %s (%s)\n", city, trace.Colo, trace.IP, trace.Loc)
 	}
-	return
+	ui.advance(1, "connection metadata")
 }
 
-func upload(bytes int) (speedMbps float64, err error) {
-	data := strings.Repeat("0", bytes)
-	measId := randomMeasId()
-	url := fmt.Sprintf("https://speed.cloudflare.com/__up?measId=%s", measId)
+func runCLI(args []string, stdout, stderr io.Writer) int {
+	return runCLIContext(context.Background(), args, stdout, stderr, cliConfig{})
+}
 
-	client := resty.New()
-	client.SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
-	client.SetHeader("Content-Type", "text/plain;charset=UTF-8")
-	client.SetHeader("Origin", "https://speed.cloudflare.com")
-	// client.SetHeader("Referer", "https://speed.cloudflare.com/")
-	// client.SetHeader("Cookie", "__cf_bm=iOwYiF1JWEK8K.i5pzLDW7ZhadIRHivZZnDQRYI6ZgQ-1746589389-1.0.1.1-rwOAZVeBAn8JzALtyoLT.sLcLLYLoKlFkxQUbsSe7qecbL4DABzT8KvmBPfvZhq.1I431uXw7GH7Y6iTFcqotS34KI_bFmzwUlBVIFlssYKBTRv_ArFhJmmsRYZpUrai; __cf_logged_in=1; _cfms_willow=enable")
-	// Add browser-like headers
-	client.SetHeader("sec-ch-ua", `"Chromium";v="141", "Brave";v="141", "Not.A/Brand";v="99"`)
-	client.SetHeader("sec-ch-ua-mobile", "?0")
-	client.SetHeader("sec-ch-ua-platform", `"macOS"`)
-	client.SetHeader("upgrade-insecure-requests", "1")
-	client.SetHeader("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-	client.SetHeader("sec-gpc", "1")
-	client.SetHeader("accept-language", "en-US,en;q=0.7")
-	client.SetHeader("sec-fetch-site", "none")
-	client.SetHeader("sec-fetch-mode", "navigate")
-	client.SetHeader("sec-fetch-user", "?1")
-	client.SetHeader("sec-fetch-dest", "document")
-	client.SetHeader("accept-encoding", "gzip, deflate, br, zstd")
-	client.SetHeader("priority", "u=0, i")
-
-	start := time.Now()
-	resp, err := client.R().
-		SetBody(data).
-		Post(url)
-	end := time.Now()
+func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer, config cliConfig) int {
+	opts, err := parseOptions(args, stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
 	if err != nil {
-		return 0, err
+		_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 2
 	}
-
-	uploadTime := end.Sub(start).Seconds()
-	if uploadTime > 0 {
-		speedMbps = float64(bytes*8) / uploadTime / 1e6
-	} else {
-		speedMbps = 0
+	if opts.showVersion {
+		_, _ = fmt.Fprintf(stdout, "go-speed-cloudflare-cli version %s\n", version)
+		return 0
 	}
-	// Optionally print resp.StatusCode(), resp.String(), etc. for debugging
-	_ = resp
-	return
-}
-
-func measureLatency() ([]float64, error) {
-	measurements := []float64{}
-	for i := 0; i < 20; i++ {
-		latency, _, err := download(1000)
-		if err != nil {
-			fmt.Println("Error:", err)
+	if config.baseURL == "" {
+		config.baseURL = cloudflareBaseURL
+	}
+	if config.phases == nil {
+		config.phases = defaultTestPhases()
+	}
+	plan := selectedPhases(config.phases, opts)
+	_, noColorEnv := os.LookupEnv("NO_COLOR")
+	ui := &textUI{stdout: stdout, stderr: stderr, progress: isTerminal(stderr) && !opts.noProgress, color: isTerminal(stdout) && !opts.noColor && !noColorEnv, total: 2}
+	for _, p := range plan {
+		ui.total += p.Count
+	}
+	defer func() {
+		ui.clearProgress()
+		if ui.progress {
+			_, _ = fmt.Fprintln(stderr)
+		}
+	}()
+	client := newMeasurementClient(config.baseURL, opts.timeout)
+	defer client.client.CloseIdleConnections()
+	ui.heading("Cloudflare Speed Test (Go CLI)")
+	_, _ = fmt.Fprintf(stdout, "Version: %s\n", version)
+	showMetadata(ctx, client, opts, ui)
+	results := make([]phaseResult, 0, len(plan))
+	finished := make(map[string]bool)
+	failed := false
+	var loss packetLossResult
+	packetLossRunner := config.packetLoss
+	if packetLossRunner == nil {
+		packetLossRunner = measurePacketLoss
+	}
+	for _, p := range plan {
+		if ctx.Err() != nil || finished[p.Direction] {
+			ui.advance(p.Count, "skipped planned work")
 			continue
 		}
-		measurements = append(measurements, latency)
-	}
-	return measurements, nil
-}
-
-func measureDownload(bytes, iterations int) ([]float64, error) {
-	measurements := []float64{}
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		_, speed, err := download(bytes)
-		elapsed := time.Since(start)
-
-		if err != nil {
-			fmt.Println("Error:", err)
+		if p.Direction == "packetloss" {
+			cfg := defaultPacketLossConfig(config.baseURL, opts.timeout)
+			if opts.turnCredsURL != "" {
+				cfg.CredentialsURL = opts.turnCredsURL
+			}
+			if opts.turnServer != "" {
+				cfg.TURNServer = opts.turnServer
+			}
+			loss = packetLossRunner(ctx, client.client, cfg, func(sent int) {
+				ui.advance(0, fmt.Sprintf("packet loss %d/%d messages sent", sent, cfg.Count))
+			})
+			if loss.Err != nil || !loss.Available {
+				failed = true
+				ui.warning("packet loss unavailable: %v", loss.Err)
+			}
+			ui.advance(p.Count, "packet loss session")
 			continue
 		}
-
-		// Skip if test takes longer than 5 seconds
-		if elapsed > 5*time.Second {
-			fmt.Printf("Skipping remaining %s download tests (took %.2fs)\n",
-				formatBytes(bytes), elapsed.Seconds())
-			break
+		label := p.Direction
+		if p.Direction != "latency" {
+			label += " " + formatBytes(p.Bytes)
 		}
-
-		measurements = append(measurements, speed)
+		result := client.runPhase(ctx, p, opts.loadedLatency && p.Direction != "latency", func(attempt int, s *sample, err error) {
+			if err != nil {
+				ui.warning("%s sample %d/%d failed: %v", label, attempt, p.Count, err)
+			}
+			ui.advance(1, fmt.Sprintf("%s %d/%d", label, attempt, p.Count))
+		})
+		if result.Attempts < p.Count {
+			ui.advance(p.Count-result.Attempts, "skipped unfinished phase")
+		}
+		results = append(results, result)
+		ui.phaseResult(result)
+		if result.Err != nil || result.Failures > 0 {
+			failed = true
+		}
+		if result.LoadedFailures > 0 {
+			failed = true
+			ui.warning("%s loaded latency probes failed: %v", p.Direction, result.LoadedErr)
+		}
+		if p.Direction != "latency" && (shouldFinish(result) || len(result.Samples) == 0) {
+			finished[p.Direction] = true
+		}
 	}
-	return measurements, nil
-}
-
-func measureUpload(bytes, iterations int) ([]float64, error) {
-	measurements := []float64{}
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		speed, err := upload(bytes)
-		elapsed := time.Since(start)
-
-		if err != nil {
-			fmt.Println("Error:", err)
+	var idle, downloadSamples, uploadSamples []sample
+	for _, result := range results {
+		switch result.Phase.Direction {
+		case "latency":
+			idle = append(idle, result.Samples...)
+		case "download":
+			downloadSamples = append(downloadSamples, result.Samples...)
+		case "upload":
+			uploadSamples = append(uploadSamples, result.Samples...)
+		}
+	}
+	ui.heading("Results")
+	latency, jitterValue, latencyOK, jitterOK := latencyStats(idle)
+	ui.metric("Unloaded latency", latency, latencyOK, "ms")
+	ui.metric("Unloaded jitter", jitterValue, jitterOK, "ms")
+	if !latencyOK || !jitterOK {
+		failed = true
+	}
+	summary := qualitySummary{
+		LatencyMs:  optionalMetric{Value: latency, Valid: latencyOK},
+		JitterMs:   optionalMetric{Value: jitterValue, Valid: jitterOK},
+		PacketLoss: optionalMetric{Value: loss.Ratio, Valid: loss.Available},
+	}
+	for _, direction := range []string{"download", "upload"} {
+		if direction == "download" && !opts.download || direction == "upload" && !opts.upload {
 			continue
 		}
-
-		// Skip if test takes longer than 20 seconds
-		if elapsed > 20*time.Second {
-			fmt.Printf("Skipping remaining %s upload tests (took %.2fs)\n",
-				formatBytes(bytes), elapsed.Seconds())
-			break
+		samples := downloadSamples
+		if direction == "upload" {
+			samples = uploadSamples
 		}
-
-		measurements = append(measurements, speed)
+		speed, ok := bandwidthBps(samples)
+		ui.metric(directionLabel(direction)+" speed (P90)", speed/1e6, ok, "Mbps")
+		if direction == "download" {
+			summary.DownloadBps = optionalMetric{Value: speed, Valid: ok}
+		} else {
+			summary.UploadBps = optionalMetric{Value: speed, Valid: ok}
+		}
+		if !ok {
+			failed = true
+		}
+		if opts.loadedLatency {
+			latency, jitterValue, latencyOK, jitterOK := loadedLatencyStats(results, direction)
+			ui.metric(directionLabel(direction)+" loaded latency", latency, latencyOK, "ms")
+			ui.metric(directionLabel(direction)+" loaded jitter", jitterValue, jitterOK, "ms")
+			if direction == "download" {
+				summary.DownLoadedLatencyMs = optionalMetric{Value: latency, Valid: latencyOK}
+			} else {
+				summary.UpLoadedLatencyMs = optionalMetric{Value: latency, Valid: latencyOK}
+			}
+		}
 	}
-	return measurements, nil
-}
-
-func logInfo(text, data string) {
-	fmt.Println(Bold(fmt.Sprintf("%s%s: %s", strings.Repeat(" ", 15-len(text)), text, Blue(data))))
-}
-
-func logLatency(data []float64) {
-	fmt.Println(Bold("         Latency:", Magenta(fmt.Sprintf("%.2f ms", median(data)))))
-	fmt.Println(Bold("          Jitter:", Magenta(fmt.Sprintf("%.2f ms", jitter(data)))))
-}
-
-func logSpeedTestResult(size string, test []float64) {
-	if len(test) == 0 {
-		fmt.Println(Bold(fmt.Sprintf("%s %s speed: %s", strings.Repeat(" ", 9-len(size)), size, Yellow("Skipped"))))
-		return
+	if opts.packetLoss {
+		ui.metric("Packet loss", loss.Ratio*100, loss.Available, "%")
 	}
-	speed := median(test)
-	fmt.Println(Bold(fmt.Sprintf("%s %s speed: %s Mbps", strings.Repeat(" ", 9-len(size)), size, Yellow(fmt.Sprintf("%.2f", speed)))))
-}
-
-func logDownloadSpeed(tests []float64) {
-	if len(tests) == 0 {
-		fmt.Println("  Download speed: N/A")
-		return
+	ui.heading("Network Quality Score")
+	for _, score := range networkQualityScores(summary) {
+		if score.Available {
+			_, _ = fmt.Fprintf(stdout, "%s: %s (%d points)\n", score.Name, score.Classification, score.Points)
+		} else {
+			_, _ = fmt.Fprintf(stdout, "%s: N/A\n", score.Name)
+		}
 	}
-	fmt.Println(Bold("  Download speed:", Green(fmt.Sprintf("%.2f Mbps", median(tests)))))
-}
-
-func logUploadSpeed(tests []float64) {
-	if len(tests) == 0 {
-		fmt.Println("    Upload speed: N/A")
-		return
+	if ctx.Err() != nil {
+		ui.warning("measurement canceled: %v", ctx.Err())
+		return 130
 	}
-	fmt.Println(Bold("    Upload speed:", Green(fmt.Sprintf("%.2f Mbps", median(tests)))))
+	if failed {
+		ui.warning("measurement incomplete; unavailable values are shown as N/A")
+		return 1
+	}
+	return 0
 }
 
 func main() {
-	var testDownload bool
-	var testUpload bool
-	var showVersion bool
-	var liteMode bool
-	var liteDownload bool
-	var liteUpload bool
-	flag.BoolVar(&testDownload, "download", false, "Test download speed only")
-	flag.BoolVar(&testUpload, "upload", false, "Test upload speed only")
-	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
-	flag.BoolVar(&liteMode, "lite", false, "Run only up to 10MB download/upload tests")
-	flag.BoolVar(&liteDownload, "lite-download", false, "Run only up to 10MB download tests")
-	flag.BoolVar(&liteUpload, "lite-upload", false, "Run only up to 10MB upload tests")
-	flag.Parse()
-
-	if showVersion {
-		fmt.Println("go-speed-cloudflare-cli version", version)
-		return
-	}
-
-	// If neither flag is set, test both
-	if !testDownload && !testUpload {
-		testDownload = true
-		testUpload = true
-	}
-
-	fmt.Println(Bold("Cloudflare Speed Test (Go CLI)"))
-	latencyData, _ := measureLatency()
-	serverLocationData, _ := fetchServerLocationData()
-	cfTrace, _ := fetchCfCdnCgiTrace()
-	city := serverLocationData[cfTrace.Colo]
-	logInfo("Server location", fmt.Sprintf("%s (%s)", city, cfTrace.Colo))
-	logInfo("Your IP", fmt.Sprintf("%s (%s)", cfTrace.IP, cfTrace.Loc))
-	logLatency(latencyData)
-
-	if liteMode {
-		fmt.Println(Bold(Green("[Lite mode] Only running up to 10MB download/upload tests.")))
-	}
-	if liteDownload && !liteMode {
-		fmt.Println(Bold(Green("[Lite download mode] Only running up to 10MB download tests.")))
-	}
-	if liteUpload && !liteMode {
-		fmt.Println(Bold(Green("[Lite upload mode] Only running up to 10MB upload tests.")))
-	}
-	if testDownload && !testUpload {
-		fmt.Println(Bold(Cyan("[Download only mode]")))
-	}
-	if testUpload && !testDownload {
-		fmt.Println(Bold(Cyan("[Upload only mode]")))
-	}
-
-	if testDownload {
-		testDown1, _ := measureDownload(100000, 10)
-		logSpeedTestResult("100kB", testDown1)
-		testDown2, _ := measureDownload(1000000, 8)
-		logSpeedTestResult("1MB", testDown2)
-		testDown3, _ := measureDownload(10000000, 6)
-		logSpeedTestResult("10MB", testDown3)
-		if !(liteMode || liteDownload) {
-			testDown4, _ := measureDownload(25000000, 4)
-			logSpeedTestResult("25MB", testDown4)
-		}
-	}
-
-	if testUpload {
-		testUp1, _ := measureUpload(10000, 10)
-		logSpeedTestResult("10kB", testUp1)
-		testUp2, _ := measureUpload(1000000, 8)
-		logSpeedTestResult("1MB", testUp2)
-		testUp3, _ := measureUpload(10000000, 6)
-		logSpeedTestResult("10MB", testUp3)
-		if !(liteMode || liteUpload) {
-			testUp4, _ := measureUpload(25000000, 4)
-			logSpeedTestResult("25MB", testUp4)
-		}
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := runCLIContext(ctx, os.Args[1:], os.Stdout, os.Stderr, cliConfig{})
+	stop()
+	os.Exit(code)
 }

@@ -7,48 +7,48 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
-  goreleaser:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: src/go.mod
+      - name: Run tests
+        working-directory: src
+        run: go test ./...
+
+  goreleaser:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7.0.0
         with:
-          go-version: '1.24'
-          check-latest: true
-          
-      - name: Extract version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
-
-      - name: Update version in source code
-        run: |
-          sed -i "s/const version = \"[0-9]*\.[0-9]*\.[0-9]*\"/const version = \"${{ env.VERSION }}\"/" src/main.go
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git add src/main.go
-          git commit -m "Update version to ${{ env.VERSION }}"
-          git push origin HEAD:${GITHUB_REF_NAME%%/*}
+          go-version-file: src/go.mod
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v5
+        uses: goreleaser/goreleaser-action@v7.2.3
         with:
           distribution: goreleaser
-          version: latest
-          args: release --clean
+          version: v2.18.2
+          args: release --clean --config ../.goreleaser.yml
+          workdir: src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: binaries
-          path: dist/*.tar.gz 
+          path: src/dist/*

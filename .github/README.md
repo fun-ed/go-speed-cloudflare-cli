@@ -1,55 +1,30 @@
 # GitHub Actions Workflows
 
-This directory contains the GitHub Actions workflows for the Go Speed Cloudflare CLI tool.
+This directory contains CI and release workflows for Go Speed Cloudflare CLI.
 
-## Release Workflow
+## Testing
 
-### Releasing a New Version
+`workflows/test.yml` runs on pushes to every branch and on pull requests. It sets
+up the Go version declared in `src/go.mod`, runs the Go unit tests from `src/`,
+and runs golangci-lint there.
 
-To create a new release:
+## Releases
 
-1. Create and push a new tag with the desired version:
-   ```
-   git tag -a vX.Y.Z -m "Version X.Y.Z"
-   git push origin vX.Y.Z
-   ```
-2. The GitHub Actions workflow will automatically:
-   - Update the version number in `src/main.go` to match the tag
-   - Commit and push this change to the branch
-   - Build binaries for multiple platforms (Linux, macOS, Windows)
-   - Create a GitHub release with the tag name
-   - Upload the binaries as release assets
+`workflows/release.yml` runs when a `v*.*.*` tag is pushed. Before building a
+release, it checks out the tag, installs the Go version from `src/go.mod`, and
+runs `go test ./...` from `src/`. GoReleaser runs only if those tests pass.
 
-### Workflow Details
+GoReleaser runs from the nested Go module in `src/` and loads the root
+`.goreleaser.yml`. It builds the shared source for Linux, macOS, and Windows.
+The tag version is injected into the binary at link time; the workflow does not
+edit, commit, or push source files. GoReleaser publishes the release assets
+using the automatically provided `GITHUB_TOKEN`. The workflow also attaches
+the generated `src/dist/` artifacts to the Actions run.
 
-The workflow is defined in `release.yml` and uses GoReleaser to build and publish the release. It's triggered whenever a tag matching the pattern `v*.*.*` is pushed.
+The application’s default version remains in `src/main.go` for local builds.
+Release binaries use the pushed tag version without changing that source value.
 
-The workflow:
-1. Extracts the version number from the tag
-2. Updates the version constant in the source code
-3. Commits and pushes this change
-4. Builds and releases the binaries using GoReleaser
+## Permissions
 
-## Testing Workflow
-
-### Automated Testing
-
-The testing workflow automatically runs tests on:
-- Pushes to the `dev` branch
-- Pull requests to the `dev` branch
-
-### Workflow Details
-
-The workflow is defined in `test.yml` and performs the following actions:
-1. Checks out the code
-2. Sets up the Go environment
-3. Downloads dependencies
-4. Runs the test suite
-5. Performs linting checks
-
-## Requirements
-
-For these workflows to function correctly:
-- The repository needs a `GITHUB_TOKEN` secret (automatically provided by GitHub)
-- GoReleaser configuration is in the `.goreleaser.yml` file in the repository root
-- The release workflow needs write permissions to push the version update commit 
+The release workflow requires `contents: write` to create the GitHub release.
+No manually configured token secret or package-publishing permission is needed.
