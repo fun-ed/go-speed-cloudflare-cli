@@ -1,0 +1,12 @@
+# Measurement and test invariants
+
+- Keep single `package main`, standard `testing`, gofmt, lower-camel internal helpers and explicit unit names. Use narrow endpoint/client/session seams and local fixtures rather than a mocking framework.
+- Preserve distinct upload TTFB and download corrected-ping-plus-body timing. HTTP error bodies, truncated/mismatched downloads, and failed drain/close operations are not valid samples. Retry waits share the whole measurement deadline; retry uploads get fresh streamed ASCII-zero bodies.
+- Type7 percentile interpolation is `(n-1)*p`; sorting helpers copy and filter nonfinite inputs. Temporal order is required for jitter. Empty numeric helper return0 does not establish a valid measurement; reducers expose availability explicitly.
+- P90 pools all eligible sizes per direction. Slow successful samples remain available before finish decisions. Loaded probes are eligible by minimum duration of the entire size bucket, summarized from the latest20 ordered probes, and canceled/joined before returning.
+- Side-probe HTTP failures remain observable separately from main attempts. Expected phase-end cancellation is not failure. Fast-transfer eligibility filtering can yield N/A without a network failure.
+- WebRTC callbacks must not mutate returned results or outlive owned cleanup. Count only unique canonical previously sent IDs. Setup/send failure is unavailable; connected zero-receive completion can validly measure100%loss.
+- NQS missing loss is neutral0points, distinct from measured0loss. Require both loaded directions and finite nonnegative inputs; missing jitter prevents RTC. Preserve raw precision before threshold comparisons.
+- Pure ANSI helpers retain reset behavior, but UI emits colors only for terminal stdout and clears progress before result lines. Decimal units and two-decimal metric output remain presentation conventions.
+- Relay-only Pion sessions disable multicast DNS host discovery. A real Go1.26/x-net0.59 shutdown trace showed mDNS Close blocked in RawRead while ICE graceful shutdown waited; longer timeouts would hide the unneeded resource. Start cancellation watchers only after peer fields are fully initialized, then close both peers gracefully with a bounded cleanup grace.
+- TURN credential parsing ignores unrelated fields and supports flat username/credential with explicit server or UDP turn urls. Explicit server wins; otherwise select UDP only, never TCP/TLS/STUN fallback. The public endpoint has been verified to use the urls-array shape.
