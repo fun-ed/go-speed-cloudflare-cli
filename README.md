@@ -18,16 +18,25 @@ cd ..
 
 The module and dependencies are already declared. Do not run `go mod init` or create a second module.
 
-To install the executable in a user-local directory, run these commands from the repository root:
+From the repository root, use the Makefile to install in `/usr/local/bin`:
 
 ```sh
-cd src
-mkdir -p "$HOME/.local/bin"
-go build -o "$HOME/.local/bin/go-speed-cloudflare-cli" .
-cd ..
+make build
+sudo make install
+go-speed-cloudflare-cli -version
 ```
 
-Make sure `$HOME/.local/bin` is on `PATH`. To build and run the container image from the repository root:
+Build as your normal user before using `sudo` for the install step. If `/usr/local/bin` is writable without administrator privileges, `make install` builds and installs directly.
+
+To install without administrator privileges, use a user-local prefix:
+
+```sh
+make install PREFIX="$HOME/.local"
+```
+
+Make sure `$HOME/.local/bin` is on `PATH`. Run `make clean` to remove the local build executable; it does not uninstall the CLI.
+
+To build and run the container image from the repository root:
 
 ```sh
 docker build --target final-alpine -t go-speed-cloudflare-cli:local .
