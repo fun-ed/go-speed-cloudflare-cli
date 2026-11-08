@@ -6,7 +6,9 @@ This directory contains CI and release workflows for Go Speed Cloudflare CLI.
 
 `workflows/test.yml` runs on pushes to every branch and on pull requests. It sets
 up the Go version declared in `src/go.mod`, runs the Go unit tests from `src/`,
-and runs golangci-lint there.
+and runs `make lint` from the repository root. The Makefile pins golangci-lint
+and runs it through `go run`, so local and CI lint use the same version without
+depending on GitHub release binary downloads.
 
 ## Releases
 

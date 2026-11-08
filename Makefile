@@ -1,6 +1,6 @@
 GO ?= go
 GOFMT ?= gofmt
-# Match .github/workflows/test.yml.
+# Shared by local checks and .github/workflows/test.yml.
 GOLANGCI_LINT_VERSION ?= v2.14.0
 PREFIX ?= /usr/local
 DESTDIR ?=

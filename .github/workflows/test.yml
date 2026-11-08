@@ -22,8 +22,4 @@ jobs:
         run: go test -v ./...
 
       - name: Run linting
-        uses: golangci/golangci-lint-action@v9.3.0
-        with:
-          version: v2.14.0
-          working-directory: src
-          args: --timeout=5m
+        run: make lint
