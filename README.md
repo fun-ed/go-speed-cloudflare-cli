@@ -1,8 +1,10 @@
 # Cloudflare speed test CLI
 
-`go-speed-cloudflare-cli` measures latency, jitter, download speed, upload speed, and packet loss using Cloudflare's `speed.cloudflare.com` service. It also calculates Cloudflare Network Quality Score (NQS) experience categories when the required measurements are available. Version 0.1.0 uses native Go HTTP and WebRTC clients, so its results are not byte-for-byte or timing-equivalent to a browser run.
+`go-speed-cloudflare-cli` measures latency, jitter, download speed, upload speed, and packet loss using Cloudflare's `speed.cloudflare.com` service. It also calculates Cloudflare Network Quality Score (NQS) experience categories when the required measurements are available. Version 0.2.0 uses native Go HTTP and WebRTC clients, so its results are not byte-for-byte or timing-equivalent to a browser run.
 
 See [the measurement specification](specs/speedtest.md) for the phase plan, formulas, traffic estimates, native-client limits, and pinned Cloudflare source references.
+
+Version 0.2.0 adds mode and traffic summaries, terminal progress that adapts to window width and shows the latest sample, and mode examples in `-help`. It updates dependencies and the shared User-Agent to Chrome 157. See the [changelog](CHANGELOG.md) for release details.
 
 ## Build and run
 
@@ -35,6 +37,18 @@ make install PREFIX="$HOME/.local"
 ```
 
 Make sure `$HOME/.local/bin` is on `PATH`. Run `make clean` to remove the local build executable; it does not uninstall the CLI.
+
+To upgrade an existing checkout to this release and replace the installed CLI:
+
+```sh
+git fetch https://github.com/fun-ed/go-speed-cloudflare-cli.git tag v0.2.0
+git switch --detach v0.2.0
+make build
+sudo make install
+go-speed-cloudflare-cli -version
+```
+
+Keep local changes committed or saved before switching versions. The version command should print `go-speed-cloudflare-cli version 0.2.0`. Reuse `PREFIX="$HOME/.local"` for a user-local installation. Prebuilt archives and checksums are available on the [v0.2.0 release page](https://github.com/fun-ed/go-speed-cloudflare-cli/releases/tag/v0.2.0).
 
 To build and run the container image from the repository root:
 
@@ -99,7 +113,11 @@ Speed uses validated payload bytes multiplied by 1.005 as an approximation for t
 
 Progress appears on a terminal's standard error. Warnings also go to standard error; results go to standard output. Color requires standard output to be a terminal and is disabled by `-no-color` or by setting `NO_COLOR` to any value. `-no-progress` disables progress even on a terminal.
 
+At startup, a mode summary shows Full or Lite for each selected direction, planned HTTP payload, and whether loaded latency and packet loss are enabled. The payload estimate follows the selected phase plan; early finish, retries, and protocol overhead can change actual traffic. `-help` includes mode examples.
+
 The percentage tracks planned work units: metadata requests, HTTP sample attempts, and one packet-loss session. Completed, failed, and skipped work all advance it. It is not an estimate of remaining time or transferred bytes.
+
+The progress line adapts to terminal width, announces each phase before its first request, and shows the latest completed sample's speed or latency. `last` is a single sample, not the final pooled P90. During packet loss it shows relay setup followed by the number of messages sent. A request or relay setup may wait until its deadline without changing the percentage. `Test complete.` appears only when required measurements succeed.
 
 ## Planned HTTP payload
 

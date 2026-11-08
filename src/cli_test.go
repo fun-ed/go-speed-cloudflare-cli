@@ -230,3 +230,73 @@ func TestRunCLIEntryWrapper(t *testing.T) {
 		t.Fatalf("unexpected offline entry output: %s %s", stdout.String(), stderr.String())
 	}
 }
+
+func TestPlanSummaryMatchesSelectedModes(t *testing.T) {
+	for _, tc := range []struct {
+		args    []string
+		mode    string
+		payload string
+	}{
+		{nil, "Download (full) + Upload (full)", "1265.8MB"},
+		{[]string{"-lite"}, "Download (lite) + Upload (lite)", "115.8MB"},
+		{[]string{"-download"}, "Download (full)", "969MB"},
+		{[]string{"-upload"}, "Upload (full)", "296.8MB"},
+		{[]string{"-lite-download"}, "Download (lite)", "69MB"},
+		{[]string{"-lite-upload"}, "Upload (lite)", "46.8MB"},
+		{[]string{"-download", "-upload", "-lite-download"}, "Download (lite) + Upload (full)", "365.8MB"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			opts, err := parseOptions(tc.args, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			ui := &textUI{stdout: &stdout, stderr: &stderr}
+			ui.planSummary(opts, selectedPhases(defaultTestPhases(), opts))
+			for _, want := range []string{"Mode: " + tc.mode + "\n", "Planned HTTP payload: " + tc.payload + " (", "Loaded latency: on | Packet loss: on (UDP TURN)"} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("missing %q in %s", want, stdout.String())
+				}
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("nonterminal summary emitted progress: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestProgressFitsTerminalWidth(t *testing.T) {
+	ui := &textUI{done: 12, total: 120}
+	for _, width := range []int{0, 1, 3, 20, 40, 60, 80, 120} {
+		line := ui.progressLine("Download 100MB 1/3 | last 1234.56 Mbps", width)
+		if len(line) > max(0, width-1) || strings.ContainsAny(line, "\r\n\033") {
+			t.Errorf("width %d: progress wraps or contains controls: %q", width, line)
+		}
+		if width >= 60 && !strings.Contains(line, "10% work 12/120") {
+			t.Errorf("width %d: missing planned work: %q", width, line)
+		}
+		if width >= 80 && !strings.HasSuffix(line, "Mbps") {
+			t.Errorf("width %d: latest speed was truncated: %q", width, line)
+		}
+	}
+	var output bytes.Buffer
+	ui.stderr = &output
+	ui.advance(1, "hidden")
+	if output.Len() != 0 || ui.done != 13 {
+		t.Fatal("disabled progress must count work without output")
+	}
+}
+
+func TestCLISummaryAndCompletion(t *testing.T) {
+	for _, failing := range []bool{false, true} {
+		server, _, _ := cliFixture(t, failing, false)
+		var stdout, stderr bytes.Buffer
+		code := runCLIContext(context.Background(), []string{"-lite-download", "-loaded-latency=false", "-packet-loss=false", "-no-progress", "-no-color"}, &stdout, &stderr, cliConfig{baseURL: server.URL, phases: smallCLIPlan()})
+		if (code == 0) == failing || strings.Contains(stdout.String(), "Test complete.") == failing {
+			t.Fatalf("completion does not match outcome: exit=%d, %s", code, stdout.String())
+		}
+		if !strings.Contains(stdout.String(), "Loaded latency: off | Packet loss: off") || strings.ContainsAny(stdout.String()+stderr.String(), "\r\033") {
+			t.Fatalf("incorrect plain output: %q %q", stdout.String(), stderr.String())
+		}
+	}
+}

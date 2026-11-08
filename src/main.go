@@ -19,9 +19,9 @@ import (
 	"golang.org/x/term"
 )
 
-var version = "0.1.0"
+var version = "0.2.0"
 
-const chromeMajorVersion = "154"
+const chromeMajorVersion = "157"
 const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + chromeMajorVersion + ".0.0.0 Safari/537.36"
 const cloudflareBaseURL = "https://speed.cloudflare.com"
 
@@ -75,6 +75,28 @@ func parseOptions(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.BoolVar(&opts.noProgress, "no-progress", false, "Disable terminal progress on stderr")
 	flags.BoolVar(&opts.noColor, "no-color", false, "Disable terminal colors")
 	flags.DurationVar(&opts.timeout, "timeout", 30*time.Second, "Whole-request deadline, including 429 retry waits")
+	flags.Usage = func() {
+		_, _ = fmt.Fprintln(stderr, `Usage: go-speed-cloudflare-cli [flags]
+
+Modes (directions can be combined):
+  (no flags)       Full download + upload (~1.266 GB planned payload)
+  -lite            Lite download + upload (~115.8 MB planned payload)
+  -download        Download only
+  -upload          Upload only
+  -lite-download   Lite download only
+  -lite-upload     Lite upload only
+
+Lite limits request sizes to 10 MB, not total traffic.
+Loaded latency and UDP packet loss are enabled by default.
+
+Examples:
+  go-speed-cloudflare-cli -lite
+  go-speed-cloudflare-cli -download -packet-loss=false
+  go-speed-cloudflare-cli -download -upload -lite-download
+
+Flags:`)
+		flags.PrintDefaults()
+	}
 	if err := flags.Parse(args); err != nil {
 		return opts, err
 	}
@@ -183,6 +205,38 @@ type textUI struct {
 	total    int
 }
 
+func (ui *textUI) planSummary(opts cliOptions, plan []phase) {
+	var modes []string
+	for _, direction := range []string{"download", "upload"} {
+		if direction == "download" && !opts.download || direction == "upload" && !opts.upload {
+			continue
+		}
+		mode := "full"
+		if opts.lite || direction == "download" && opts.liteDownload || direction == "upload" && opts.liteUpload {
+			mode = "lite"
+		}
+		modes = append(modes, directionLabel(direction)+" ("+mode+")")
+	}
+	var payload int
+	for _, p := range plan {
+		if p.Direction == "download" || p.Direction == "upload" {
+			payload += p.Bytes * p.Count
+		}
+	}
+	_, _ = fmt.Fprintf(ui.stdout, "Mode: %s\nPlanned HTTP payload: %s (before early finish/retries; not a cap)\n", strings.Join(modes, " + "), formatBytes(payload))
+	loaded, loss := "off", "off"
+	if opts.loadedLatency {
+		loaded = "on"
+	}
+	if opts.packetLoss {
+		loss = "on (UDP TURN)"
+	}
+	_, _ = fmt.Fprintf(ui.stdout, "Loaded latency: %s | Packet loss: %s\n\n", loaded, loss)
+	if ui.progress {
+		_, _ = fmt.Fprintln(ui.stderr, "Progress tracks planned work, including skips; not time remaining. Ctrl+C to cancel.")
+	}
+}
+
 func (ui *textUI) clearProgress() {
 	if ui.progress {
 		_, _ = fmt.Fprint(ui.stderr, "\r\033[K")
@@ -197,9 +251,36 @@ func (ui *textUI) advance(units int, label string) {
 	if !ui.progress || ui.total == 0 {
 		return
 	}
+	width := 80
+	if file, ok := ui.stderr.(*os.File); ok {
+		if columns, _, err := term.GetSize(int(file.Fd())); err == nil && columns > 0 {
+			width = columns
+		}
+	}
+	_, _ = fmt.Fprint(ui.stderr, "\r\033[K"+ui.progressLine(label, width))
+}
+
+func (ui *textUI) progressLine(label string, width int) string {
 	percent := 100 * ui.done / ui.total
-	filled := 20 * ui.done / ui.total
-	_, _ = fmt.Fprintf(ui.stderr, "\r\033[K[%s%s] %3d%% work %d/%d | %s", strings.Repeat("#", filled), strings.Repeat("-", 20-filled), percent, ui.done, ui.total, label)
+	barWidth := 16
+	if width < 100 {
+		barWidth = 8
+	}
+	filled := barWidth * ui.done / ui.total
+	prefix := fmt.Sprintf("[%s%s] %3d%% work %d/%d | ", strings.Repeat("#", filled), strings.Repeat("-", barWidth-filled), percent, ui.done, ui.total)
+	if width < 60 {
+		prefix = fmt.Sprintf("%3d%% | ", percent)
+	}
+	line := prefix + label
+	// Leave the last column empty to avoid terminal auto-wrap.
+	limit := max(0, width-1)
+	if len(line) > limit {
+		if limit >= 3 {
+			return line[:limit-3] + "..."
+		}
+		return line[:limit]
+	}
+	return line
 }
 
 func (ui *textUI) warning(format string, args ...any) {
@@ -279,6 +360,7 @@ func fetchBody(ctx context.Context, client *measurementClient, path string, time
 
 func showMetadata(ctx context.Context, client *measurementClient, opts cliOptions, ui *textUI) {
 	cities := make(map[string]string)
+	ui.advance(0, "Finding server locations")
 	body, err := fetchBody(ctx, client, "/locations", opts.timeout)
 	if err == nil {
 		var locations []Location
@@ -290,7 +372,7 @@ func showMetadata(ctx context.Context, client *measurementClient, opts cliOption
 	if err != nil {
 		ui.warning("server locations unavailable: %v", err)
 	}
-	ui.advance(1, "server locations")
+	ui.advance(1, "Reading connection metadata")
 	body, err = fetchBody(ctx, client, "/cdn-cgi/trace", opts.timeout)
 	var trace CfTrace
 	if err == nil {
@@ -365,6 +447,7 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	defer client.client.CloseIdleConnections()
 	ui.heading("Cloudflare Speed Test (Go CLI)")
 	_, _ = fmt.Fprintf(stdout, "Version: %s\n", version)
+	ui.planSummary(opts, plan)
 	showMetadata(ctx, client, opts, ui)
 	results := make([]phaseResult, 0, len(plan))
 	finished := make(map[string]bool)
@@ -380,6 +463,7 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			continue
 		}
 		if p.Direction == "packetloss" {
+			ui.advance(0, "Packet loss: connecting to UDP relay")
 			cfg := defaultPacketLossConfig(config.baseURL, opts.timeout)
 			if opts.turnCredsURL != "" {
 				cfg.CredentialsURL = opts.turnCredsURL
@@ -388,7 +472,7 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 				cfg.TURNServer = opts.turnServer
 			}
 			loss = packetLossRunner(ctx, client.client, cfg, func(sent int) {
-				ui.advance(0, fmt.Sprintf("packet loss %d/%d messages sent", sent, cfg.Count))
+				ui.advance(0, fmt.Sprintf("Packet loss: %d/%d sent", sent, cfg.Count))
 			})
 			if loss.Err != nil || !loss.Available {
 				failed = true
@@ -397,15 +481,28 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			ui.advance(p.Count, "packet loss session")
 			continue
 		}
-		label := p.Direction
+		label := directionLabel(p.Direction)
 		if p.Direction != "latency" {
 			label += " " + formatBytes(p.Bytes)
 		}
+		ui.advance(0, fmt.Sprintf("%s: starting %d samples", label, p.Count))
 		result := client.runPhase(ctx, p, opts.loadedLatency && p.Direction != "latency", func(attempt int, s *sample, err error) {
 			if err != nil {
 				ui.warning("%s sample %d/%d failed: %v", label, attempt, p.Count, err)
 			}
-			ui.advance(1, fmt.Sprintf("%s %d/%d", label, attempt, p.Count))
+			status := fmt.Sprintf("%s %d/%d", label, attempt, p.Count)
+			if err != nil {
+				status += " failed"
+			} else if s != nil {
+				if p.Direction == "latency" {
+					status += fmt.Sprintf(" | last %.2f ms", s.LatencyMs)
+				} else if s.DurationMs >= 10 && finitePositive(s.SpeedBps) {
+					status += fmt.Sprintf(" | last %.2f Mbps", s.SpeedBps/1e6)
+				} else {
+					status += " | last N/A"
+				}
+			}
+			ui.advance(1, status)
 		})
 		if result.Attempts < p.Count {
 			ui.advance(p.Count-result.Attempts, "skipped unfinished phase")
@@ -494,6 +591,7 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		ui.warning("measurement incomplete; unavailable values are shown as N/A")
 		return 1
 	}
+	ui.heading("Test complete.")
 	return 0
 }
 

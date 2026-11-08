@@ -6,3 +6,6 @@
 - GoReleaser runs from `src/` with `--config ../.goreleaser.yml`; main `.` is relative to that module. Version is injected into the variable `main.version` through `-X`, not by source rewrites.
 - QA workflow covers branch pushes and PRs. Tag releases test before packaging and do not commit/push source. Current action/tool versions remain configuration facts, not memory guarantees.
 - Local container/snapshot QA must not publish. Source validation does not prove a GitHub-hosted workflow or release ran.
+- The publication repository is `fun-ed/go-speed-cloudflare-cli` on `master`, using the `fun-ed` remote. `origin` points to the older upstream and is not the release target. Verify live remote configuration before publishing.
+- Read the linter version from `.github/workflows/test.yml` when checking a release. A newer local linter can add diagnostics; a clean diff-only lint does not prove the CI-pinned full lint passes.
+- Source installs use the default version in `main.go`, while release assets inject the tag version. Keep source version, changelog, README upgrade instructions and release tag aligned. Verify CI, published assets and the installed executable separately.

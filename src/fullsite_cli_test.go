@@ -56,7 +56,7 @@ func TestCLIPacketLossSuccessAndDisabled(t *testing.T) {
 			if enabled && (called != 1 || !strings.Contains(stdout.String(), "Packet loss: 1.00 %")) {
 				t.Fatalf("packet loss omitted: %s", stdout.String())
 			}
-			if !enabled && (called != 0 || strings.Contains(stdout.String(), "Packet loss:")) {
+			if !enabled && (called != 0 || strings.Contains(stdout.String(), "\nPacket loss:")) {
 				t.Fatalf("disabled loss still executed: %s", stdout.String())
 			}
 			if !strings.Contains(stdout.String(), "Network Quality Score") || !strings.Contains(stdout.String(), "streaming: N/A") {
