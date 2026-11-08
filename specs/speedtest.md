@@ -1,6 +1,6 @@
 # Speed-test measurement specification
 
-This document describes `go-speed-cloudflare-cli` version 0.2.0. The Cloudflare reference is `@cloudflare/speedtest` 1.14.1 at commit [`323da2ea5697ab4953f2c90c931125ac35d019d8`](https://github.com/cloudflare/speedtest/tree/323da2ea5697ab4953f2c90c931125ac35d019d8). The pinned source provides the reference plan and formulas. It does not establish that the current website deploys that exact revision or applies no private overrides.
+This document describes `go-speed-cloudflare-cli` version 0.2.1. The Cloudflare reference is `@cloudflare/speedtest` 1.14.1 at commit [`323da2ea5697ab4953f2c90c931125ac35d019d8`](https://github.com/cloudflare/speedtest/tree/323da2ea5697ab4953f2c90c931125ac35d019d8). The pinned source provides the reference plan and formulas. It does not establish that the current website deploys that exact revision or applies no private overrides.
 
 The CLI is a native Go HTTP and WebRTC client. Its output is an approximation of the reference methodology, not a browser-equivalent timing or transfer-size record. Source links below point to the pinned Cloudflare commit unless another repository is named.
 

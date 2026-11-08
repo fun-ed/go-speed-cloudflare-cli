@@ -19,7 +19,7 @@ import (
 	"golang.org/x/term"
 )
 
-var version = "0.2.0"
+var version = "0.2.1"
 
 const chromeMajorVersion = "157"
 const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + chromeMajorVersion + ".0.0.0 Safari/537.36"

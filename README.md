@@ -1,10 +1,10 @@
 # Cloudflare speed test CLI
 
-`go-speed-cloudflare-cli` measures latency, jitter, download speed, upload speed, and packet loss using Cloudflare's `speed.cloudflare.com` service. It also calculates Cloudflare Network Quality Score (NQS) experience categories when the required measurements are available. Version 0.2.0 uses native Go HTTP and WebRTC clients, so its results are not byte-for-byte or timing-equivalent to a browser run.
+`go-speed-cloudflare-cli` measures latency, jitter, download speed, upload speed, and packet loss using Cloudflare's `speed.cloudflare.com` service. It also calculates Cloudflare Network Quality Score (NQS) experience categories when the required measurements are available. Version 0.2.1 uses native Go HTTP and WebRTC clients, so its results are not byte-for-byte or timing-equivalent to a browser run.
 
 See [the measurement specification](specs/speedtest.md) for the phase plan, formulas, traffic estimates, native-client limits, and pinned Cloudflare source references.
 
-Version 0.2.0 adds mode and traffic summaries, terminal progress that adapts to window width and shows the latest sample, and mode examples in `-help`. It updates dependencies and the shared User-Agent to Chrome 157. See the [changelog](CHANGELOG.md) for release details.
+Version 0.2.0 added mode and traffic summaries, terminal progress that adapts to window width and shows the latest sample, and mode examples in `-help`. It updated dependencies and the shared User-Agent to Chrome 157. Version 0.2.1 adds Makefile commands for development checks and local installation. See the [changelog](CHANGELOG.md) for release details.
 
 ## Build and run
 
@@ -38,17 +38,32 @@ make install PREFIX="$HOME/.local"
 
 Make sure `$HOME/.local/bin` is on `PATH`. Run `make clean` to remove the local build executable; it does not uninstall the CLI.
 
+Use `make help` to list the management commands:
+
+| Command | Action |
+| --- | --- |
+| `make check` | Check formatting, tests, race detection, vet, CI-pinned lint, and build |
+| `make test`, `make race`, `make coverage` | Run tests, race checks, or coverage separately |
+| `make vet`, `make lint` | Run static checks separately |
+| `make fmt`, `make fmt-check` | Format Go files, or fail if formatting is needed |
+| `make build`, `make version` | Build, or print the built CLI's version |
+| `make install-local` | Install to `$HOME/.local/bin` without sudo |
+| `make verify-install` | Show the executable resolved by PATH and its version |
+| `make clean` | Remove the local build executable |
+
+Tests use local fixtures and do not run a public speed test. Lint uses `go run` with the version pinned by this Makefile to match CI; its first run may download the tool. `GO` and `GOFMT` can select a runtime manager, for example `make GO='mise exec -- go' GOFMT='mise exec -- gofmt' check`. `make clean` does not remove downloaded tools or the installed CLI.
+
 To upgrade an existing checkout to this release and replace the installed CLI:
 
 ```sh
-git fetch https://github.com/fun-ed/go-speed-cloudflare-cli.git tag v0.2.0
-git switch --detach v0.2.0
+git fetch https://github.com/fun-ed/go-speed-cloudflare-cli.git tag v0.2.1
+git switch --detach v0.2.1
 make build
 sudo make install
 go-speed-cloudflare-cli -version
 ```
 
-Keep local changes committed or saved before switching versions. The version command should print `go-speed-cloudflare-cli version 0.2.0`. Reuse `PREFIX="$HOME/.local"` for a user-local installation. Prebuilt archives and checksums are available on the [v0.2.0 release page](https://github.com/fun-ed/go-speed-cloudflare-cli/releases/tag/v0.2.0).
+Keep local changes committed or saved before switching versions. The version command should print `go-speed-cloudflare-cli version 0.2.1`. Use `make install-local` instead of `sudo make install` for a user-local installation. Prebuilt archives and checksums are available on the [v0.2.1 release page](https://github.com/fun-ed/go-speed-cloudflare-cli/releases/tag/v0.2.1).
 
 To build and run the container image from the repository root:
 
