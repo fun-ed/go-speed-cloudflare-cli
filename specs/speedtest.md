@@ -1,6 +1,6 @@
 # Speed-test measurement specification
 
-This document describes `go-speed-cloudflare-cli` version 0.2.1. The Cloudflare reference is `@cloudflare/speedtest` 1.14.1 at commit [`323da2ea5697ab4953f2c90c931125ac35d019d8`](https://github.com/cloudflare/speedtest/tree/323da2ea5697ab4953f2c90c931125ac35d019d8). The pinned source provides the reference plan and formulas. It does not establish that the current website deploys that exact revision or applies no private overrides.
+This document describes `go-speed-cloudflare-cli` development version 0.3.0-dev. The Cloudflare reference is `@cloudflare/speedtest` 1.14.1 at commit [`323da2ea5697ab4953f2c90c931125ac35d019d8`](https://github.com/cloudflare/speedtest/tree/323da2ea5697ab4953f2c90c931125ac35d019d8). The pinned source provides the reference plan and formulas. It does not establish that the current website deploys that exact revision or applies no private overrides.
 
 The CLI is a native Go HTTP and WebRTC client. Its output is an approximation of the reference methodology, not a browser-equivalent timing or transfer-size record. Source links below point to the pinned Cloudflare commit unless another repository is named.
 
@@ -189,15 +189,21 @@ The pinned score fixture uses 20 ms latency, 10 ms jitter, 0.01 loss, 50 Mbps do
 
 ## Output, flags, and exit behavior
 
-The CLI prints connection metadata when available, phase speed summaries, then final metrics. An unavailable metric prints `N/A`; it is never replaced by a measured zero. Metadata errors print a warning to standard error but do not alone change success status. Results go to standard output, warnings and terminal progress go to standard error. Progress is shown only when standard error is a terminal and is disabled by `-no-progress`. Colors require a terminal on standard output and are disabled by `-no-color` or any set `NO_COLOR` environment variable.
+The CLI prints connection metadata when available, phase speed summaries, then final metrics. An unavailable metric prints `N/A`; it is never replaced by a measured zero. Metadata errors print a warning to standard error but do not alone change success status. Results go to standard output, warnings and terminal progress go to standard error. Progress is shown only when standard error is a terminal and is disabled by `-no-progress`. Colors require a terminal on standard output and are disabled by `-no-color` or any set `NO_COLOR` environment variable. In all output modes, `TERM=dumb` disables progress control sequences and colors.
 
 Progress counts two metadata operations, each planned HTTP sample attempt, and one packet-loss session. Completed, failed, and skipped units advance the same denominator. Sending individual WebRTC messages updates the status label, not the work percentage. This is planned-work progress, not elapsed-time or byte progress.
+
+The optional `-tui` dashboard observes the same HTTP samples, completed phases, packet-loss result, and planned-work progress as text mode. It uses the existing reducers for provisional and final values, with loaded eligibility determined after phase completion. It does not change the phase plan or measurement timers. On redirected streams, `TERM=dumb`, or with `-no-progress`, it falls back to text. Canceling or quitting joins active measurement cleanup before terminal restoration; reruns start with fresh state and consume traffic again. The final text report and warnings are written after leaving the alternate screen.
+
+`-metrics-file path.prom` exports the same final or partial results in Prometheus text format after each run, including TUI reruns and cancellation. Bandwidth uses bits/s; latency and jitter use seconds; packet loss is a 0-to-1 ratio. Disabled measurements are omitted. Unavailable values omit their numeric series and export availability 0; valid measured zero values export both value 0 and availability 1. NQS points use the existing scorer and its zero floor. Build version, measurement exit code, success, and completion time are included; IP, location, credentials, endpoint URLs, and error strings are excluded.
+
+The destination parent must exist. Non-`.prom` paths and existing symlinks or non-regular targets are rejected before measurement. Writing uses a temporary file in the destination directory and rename; Unix readers see a complete old or new snapshot. On Unix, new files have mode 0600, while existing file permission bits are preserved. An export failure leaves the old snapshot unchanged and exits 1, with cancellation retaining exit 130. The completion-time gauge supports stale-result detection.
 
 | Exit code | Meaning |
 | ---: | --- |
 | `0` | Required measurements completed |
-| `1` | An enabled measurement failed or a required result was unavailable |
-| `2` | Invalid flags, incompatible selection, or positional arguments |
+| `1` | An enabled measurement failed, a required result was unavailable, or metrics export failed |
+| `2` | Invalid flags, incompatible selection, positional arguments, or invalid metrics output path |
 | `130` | Context cancellation or interruption |
 
 `-help` and `-version` complete without network access. The version command prints the binary's version and exits 0.

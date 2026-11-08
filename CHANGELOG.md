@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0-dev (unreleased)
+
+### Added
+
+- Add an optional interactive TUI with speed curves, provisional P90, network metrics, measurement details, warnings, cancellation, and reruns.
+- Add `-metrics-file` for Prometheus textfile snapshots after each completed, failed, or canceled run, including TUI reruns.
+- Export measurement availability, native NQS points, outcome, completion time, and build version without connection-identifying labels.
+- Replace snapshots through a same-directory temporary file and rename, preserving existing permission bits and rejecting symlink targets.
+
+### Changed
+
+- Bump the source development version to 0.3.0-dev to distinguish it from published 0.2.1 binaries.
+- Disable ANSI progress and colors on `TERM=dumb` terminals.
+
+
 ## [0.2.1] - 2026-11-08
 
 ### Added

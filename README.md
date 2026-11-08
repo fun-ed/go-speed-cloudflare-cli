@@ -1,10 +1,12 @@
 # Cloudflare speed test CLI
 
-`go-speed-cloudflare-cli` measures latency, jitter, download speed, upload speed, and packet loss using Cloudflare's `speed.cloudflare.com` service. It also calculates Cloudflare Network Quality Score (NQS) experience categories when the required measurements are available. Version 0.2.1 uses native Go HTTP and WebRTC clients, so its results are not byte-for-byte or timing-equivalent to a browser run.
+`go-speed-cloudflare-cli` measures latency, jitter, download speed, upload speed, and packet loss using Cloudflare's `speed.cloudflare.com` service. It also calculates Cloudflare Network Quality Score (NQS) experience categories when the required measurements are available. The current development version is 0.3.0-dev. It uses native Go HTTP and WebRTC clients, so its results are not byte-for-byte or timing-equivalent to a browser run.
 
 See [the measurement specification](specs/speedtest.md) for the phase plan, formulas, traffic estimates, native-client limits, and pinned Cloudflare source references.
 
 Version 0.2.0 added mode and traffic summaries, terminal progress that adapts to window width and shows the latest sample, and mode examples in `-help`. It updated dependencies and the shared User-Agent to Chrome 157. Version 0.2.1 adds Makefile commands for development checks and local installation. See the [changelog](CHANGELOG.md) for release details.
+
+Development version 0.3.0-dev adds the interactive dashboard and Prometheus textfile output described below. The published 0.2.1 release does not include these features.
 
 ## Build and run
 
@@ -53,7 +55,7 @@ Use `make help` to list the management commands:
 
 Tests use local fixtures and do not run a public speed test. Lint uses `go run` with the version pinned by this Makefile to match CI; its first run may download the tool. `GO` and `GOFMT` can select a runtime manager, for example `make GO='mise exec -- go' GOFMT='mise exec -- gofmt' check`. `make clean` does not remove downloaded tools or the installed CLI.
 
-To upgrade an existing checkout to this release and replace the installed CLI:
+To install the published stable version 0.2.1 from an existing checkout and replace the installed CLI:
 
 ```sh
 git fetch https://github.com/fun-ed/go-speed-cloudflare-cli.git tag v0.2.1
@@ -71,6 +73,58 @@ To build and run the container image from the repository root:
 docker build --target final-alpine -t go-speed-cloudflare-cli:local .
 docker run --rm go-speed-cloudflare-cli:local ./main -lite
 ```
+
+## Interactive dashboard
+
+```sh
+go-speed-cloudflare-cli -tui -lite
+```
+
+`-tui` shows download and upload sample curves, provisional pooled P90 speeds, latency, jitter, packet loss, and Network Quality Score categories. Wide terminals use columns; narrow terminals stack the panels. Curves follow sample order, use independent vertical scales, and include only bandwidth samples eligible for the final P90. Loaded metrics update after completed phases establish eligibility. Missing values remain `N/A`.
+
+| Key | Action |
+| --- | --- |
+| `Tab`, `Shift+Tab`, or `1` / `2` / `3` | Switch Overview, Measurements, and Warnings |
+| Arrow up/down, Page Up/Down, Home/End | Scroll the selected panel |
+| `c` | Cancel the current run and keep its partial results open |
+| `r` | Start a fresh run after completion or cancellation, using the same flags |
+| `q` or `Ctrl+C` | Cancel active work, wait for cleanup, and leave the dashboard |
+
+Each rerun uses real bandwidth again. The default full/lite traffic estimates still apply. The dashboard stays open after completion; quitting restores the terminal and prints the last run's text report to stdout and warnings to stderr. Its exit code reflects that run, including 130 for cancellation.
+
+The dashboard requires interactive stdin, stdout, and stderr. Redirected streams, `TERM=dumb`, or `-no-progress` select the existing text output instead. `-no-color` and `NO_COLOR` disable dashboard styling while retaining terminal navigation. `-help` and `-version` stay offline even with `-tui`.
+
+## Prometheus metrics file
+
+```sh
+go-speed-cloudflare-cli -lite -metrics-file ./cloudflare-speedtest.prom
+go-speed-cloudflare-cli -tui -lite -metrics-file ./cloudflare-speedtest.prom
+```
+
+The CLI writes the last run's metrics after success, measurement failure, or cancellation. Each TUI rerun replaces the same snapshot. On Unix, a temporary file in the same directory and a rename keep readers from seeing partial output. The metrics file contains the final or partial results from the same reducers as the CLI, not separate measurements.
+
+The parent directory must already exist and be writable. The destination must end in `.prom`; existing symlinks and directories are rejected before a run starts. On Unix, new files use mode `0600`, and replacement preserves an existing file's permission bits. The replacement file belongs to the CLI process. If node_exporter runs under another account, configure file and directory read access before collecting it. Temporary files use a `.tmp` extension, so the collector ignores them.
+
+Point the existing [node_exporter textfile collector](https://github.com/prometheus/node_exporter#textfile-collector) at the directory containing this file with `--collector.textfile.directory=/path/to/collector-directory`. Prometheus then scrapes node_exporter as usual. Schedule CLI runs separately if regular measurements are needed; every run consumes bandwidth.
+
+All metric names start with `cloudflare_speedtest_`:
+
+| Metric suffix | Labels | Meaning |
+| --- | --- | --- |
+| `bandwidth_bits_per_second` | `direction="download"` or `"upload"` | Pooled bandwidth P90 in bits/s |
+| `latency_seconds` | `load="unloaded"`, `"download"`, or `"upload"` | Median latency in seconds |
+| `jitter_seconds` | `load` | Consecutive-probe jitter in seconds |
+| `packet_loss_ratio` | None | WebRTC message loss as a fraction from 0 to 1 |
+| `network_quality_points` | `category="streaming"`, `"gaming"`, or `"rtc"` | Existing native NQS points, including its zero floor; not normalized to 100 |
+| `bandwidth_available`, `latency_available`, `jitter_available`, `packet_loss_available`, `network_quality_available` | Corresponding metric labels | 1 for an available result, 0 for unavailable |
+| `run_success` | None | 1 when the measurement run succeeded, otherwise 0 |
+| `run_exit_code` | None | Measurement outcome: 0, 1, or 130 |
+| `run_completed_timestamp_seconds` | None | Unix completion time, including failed or canceled runs |
+| `build_info` | `version` | Build version with value 1 |
+
+Unavailable numeric series are omitted rather than exported as zero, NaN, or infinity. Measured zero latency, jitter, packet loss, or NQS points remain valid zero values. Disabled measurements are omitted. Partial runs can still have available measurements, so check `run_success` before treating them as a successful full result. Labels do not include IPs, locations, URLs, credentials, or error strings. The completion time is a gauge value, not a sample timestamp, as required by the textfile collector.
+
+Invalid output paths exit 2 before measurement. A write failure exits 1 unless the run was canceled, which keeps exit 130. Failed replacement preserves the previous snapshot; use `run_completed_timestamp_seconds` to detect stale data. Standard output and error keep their existing report and warning roles.
 
 ## Select measurements
 
@@ -100,6 +154,8 @@ Lite mode limits each selected direction's bandwidth requests to 10 MB or less. 
 | `-turn-server host:port` | Cloudflare TURN server | Fallback TURN authority when the response provides neither `server` nor a `urls` field |
 | `-no-progress` | `false` | Disable terminal progress output |
 | `-no-color` | `false` | Disable terminal colors |
+| `-tui` | `false` | Use an interactive dashboard when all streams are terminals and progress is enabled |
+| `-metrics-file path` | Disabled | Replace a `.prom` snapshot after each run for a Prometheus textfile collector |
 | `-version` | | Print the version without network access |
 | `-help` | | Print usage without network access |
 
@@ -126,7 +182,7 @@ Bandwidth samples with non-positive or non-finite speed, or a measured duration 
 
 Speed uses validated payload bytes multiplied by 1.005 as an approximation for transfer overhead. It is not the browser's exact `transferSize`. The HTTP timer starts when Go reports that it wrote request headers, not at browser navigation or DNS/TCP/TLS setup. This native timing and byte accounting can differ from Cloudflare's browser UI. Packet loss also uses Pion's native WebRTC implementation rather than a browser engine.
 
-Progress appears on a terminal's standard error. Warnings also go to standard error; results go to standard output. Color requires standard output to be a terminal and is disabled by `-no-color` or by setting `NO_COLOR` to any value. `-no-progress` disables progress even on a terminal.
+Progress appears on a terminal's standard error. Warnings also go to standard error; results go to standard output. Color requires standard output to be a terminal and is disabled by `-no-color` or by setting `NO_COLOR` to any value. `-no-progress` disables progress even on a terminal. In all output modes, `TERM=dumb` disables both progress control sequences and colors.
 
 At startup, a mode summary shows Full or Lite for each selected direction, planned HTTP payload, and whether loaded latency and packet loss are enabled. The payload estimate follows the selected phase plan; early finish, retries, and protocol overhead can change actual traffic. `-help` includes mode examples.
 

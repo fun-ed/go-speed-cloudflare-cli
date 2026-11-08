@@ -19,7 +19,7 @@ import (
 	"golang.org/x/term"
 )
 
-var version = "0.2.1"
+var version = "0.3.0-dev"
 
 const chromeMajorVersion = "157"
 const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + chromeMajorVersion + ".0.0.0 Safari/537.36"
@@ -49,6 +49,8 @@ type cliOptions struct {
 	turnServer    string
 	noProgress    bool
 	noColor       bool
+	tui           bool
+	metricsFile   string
 	timeout       time.Duration
 }
 
@@ -56,6 +58,7 @@ type cliConfig struct {
 	baseURL    string
 	phases     []phase
 	packetLoss func(context.Context, *http.Client, packetLossConfig, func(int)) packetLossResult
+	observe    func(any)
 }
 
 func parseOptions(args []string, stderr io.Writer) (cliOptions, error) {
@@ -74,6 +77,8 @@ func parseOptions(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.StringVar(&opts.turnServer, "turn-server", "", "Fallback TURN host:port when the credentials response has no server or urls")
 	flags.BoolVar(&opts.noProgress, "no-progress", false, "Disable terminal progress on stderr")
 	flags.BoolVar(&opts.noColor, "no-color", false, "Disable terminal colors")
+	flags.BoolVar(&opts.tui, "tui", false, "Show an interactive dashboard; fall back to text when redirected")
+	flags.StringVar(&opts.metricsFile, "metrics-file", "", "Write final Prometheus metrics to a .prom file (parent directory must exist)")
 	flags.DurationVar(&opts.timeout, "timeout", 30*time.Second, "Whole-request deadline, including 429 retry waits")
 	flags.Usage = func() {
 		_, _ = fmt.Fprintln(stderr, `Usage: go-speed-cloudflare-cli [flags]
@@ -93,6 +98,7 @@ Examples:
   go-speed-cloudflare-cli -lite
   go-speed-cloudflare-cli -download -packet-loss=false
   go-speed-cloudflare-cli -download -upload -lite-download
+  go-speed-cloudflare-cli -tui -lite
 
 Flags:`)
 		flags.PrintDefaults()
@@ -203,6 +209,7 @@ type textUI struct {
 	color    bool
 	done     int
 	total    int
+	observe  func(any)
 }
 
 func (ui *textUI) planSummary(opts cliOptions, plan []phase) {
@@ -237,6 +244,12 @@ func (ui *textUI) planSummary(opts cliOptions, plan []phase) {
 	}
 }
 
+func (ui *textUI) emit(event any) {
+	if ui.observe != nil {
+		ui.observe(event)
+	}
+}
+
 func (ui *textUI) clearProgress() {
 	if ui.progress {
 		_, _ = fmt.Fprint(ui.stderr, "\r\033[K")
@@ -248,6 +261,7 @@ func (ui *textUI) advance(units int, label string) {
 	if ui.done > ui.total {
 		ui.done = ui.total
 	}
+	ui.emit(tuiProgressMsg{Done: ui.done, Total: ui.total, Label: label})
 	if !ui.progress || ui.total == 0 {
 		return
 	}
@@ -284,6 +298,7 @@ func (ui *textUI) progressLine(label string, width int) string {
 }
 
 func (ui *textUI) warning(format string, args ...any) {
+	ui.emit(tuiWarningMsg(fmt.Sprintf(format, args...)))
 	ui.clearProgress()
 	_, _ = fmt.Fprintf(ui.stderr, "Warning: "+format+"\n", args...)
 }
@@ -310,6 +325,7 @@ func (ui *textUI) metric(label string, value float64, ok bool, unit string) {
 }
 
 func (ui *textUI) phaseResult(result phaseResult) {
+	ui.emit(tuiPhaseMsg(result))
 	if result.Phase.Direction == "latency" {
 		return
 	}
@@ -398,12 +414,14 @@ func showMetadata(ctx context.Context, client *measurementClient, opts cliOption
 	if err != nil {
 		ui.warning("connection metadata unavailable: %v", err)
 		_, _ = fmt.Fprintln(ui.stdout, "Server location: N/A\nYour IP: N/A")
+		ui.emit(tuiMetadataMsg{Location: "N/A", IP: "N/A"})
 	} else {
 		city := cities[trace.Colo]
 		if city == "" {
 			city = "Unknown city"
 		}
 		_, _ = fmt.Fprintf(ui.stdout, "Server location: %s (%s)\nYour IP: %s (%s)\n", city, trace.Colo, trace.IP, trace.Loc)
+		ui.emit(tuiMetadataMsg{Location: fmt.Sprintf("%s (%s)", city, trace.Colo), IP: trace.IP})
 	}
 	ui.advance(1, "connection metadata")
 }
@@ -425,6 +443,22 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stdout, "go-speed-cloudflare-cli version %s\n", version)
 		return 0
 	}
+	if opts.metricsFile != "" {
+		if _, err := metricsFileMode(opts.metricsFile); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 2
+		}
+	}
+	if opts.tui {
+		if !opts.noProgress && os.Getenv("TERM") != "dumb" && isTerminal(os.Stdin) && isTerminal(stdout) && isTerminal(stderr) {
+			return runTUIContext(ctx, opts, stdout, stderr, os.Stdin, config)
+		}
+		_, _ = fmt.Fprintln(stderr, "Warning: TUI needs an interactive terminal and progress enabled; using plain output")
+	}
+	return runMeasurements(ctx, opts, stdout, stderr, config)
+}
+
+func runMeasurements(ctx context.Context, opts cliOptions, stdout, stderr io.Writer, config cliConfig) int {
 	if config.baseURL == "" {
 		config.baseURL = cloudflareBaseURL
 	}
@@ -433,7 +467,8 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	plan := selectedPhases(config.phases, opts)
 	_, noColorEnv := os.LookupEnv("NO_COLOR")
-	ui := &textUI{stdout: stdout, stderr: stderr, progress: isTerminal(stderr) && !opts.noProgress, color: isTerminal(stdout) && !opts.noColor && !noColorEnv, total: 2}
+	terminalControl := os.Getenv("TERM") != "dumb"
+	ui := &textUI{stdout: stdout, stderr: stderr, progress: terminalControl && isTerminal(stderr) && !opts.noProgress, color: terminalControl && isTerminal(stdout) && !opts.noColor && !noColorEnv, total: 2, observe: config.observe}
 	for _, p := range plan {
 		ui.total += p.Count
 	}
@@ -474,6 +509,7 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			loss = packetLossRunner(ctx, client.client, cfg, func(sent int) {
 				ui.advance(0, fmt.Sprintf("Packet loss: %d/%d sent", sent, cfg.Count))
 			})
+			ui.emit(tuiLossMsg(loss))
 			if loss.Err != nil || !loss.Available {
 				failed = true
 				ui.warning("packet loss unavailable: %v", loss.Err)
@@ -494,6 +530,7 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			if err != nil {
 				status += " failed"
 			} else if s != nil {
+				ui.emit(tuiSampleMsg(*s))
 				if p.Direction == "latency" {
 					status += fmt.Sprintf(" | last %.2f ms", s.LatencyMs)
 				} else if s.DurationMs >= 10 && finitePositive(s.SpeedBps) {
@@ -543,6 +580,7 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		JitterMs:   optionalMetric{Value: jitterValue, Valid: jitterOK},
 		PacketLoss: optionalMetric{Value: loss.Ratio, Valid: loss.Available},
 	}
+	var downloadLoadedJitter, uploadLoadedJitter optionalMetric
 	for _, direction := range []string{"download", "upload"} {
 		if direction == "download" && !opts.download || direction == "upload" && !opts.upload {
 			continue
@@ -567,8 +605,10 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			ui.metric(directionLabel(direction)+" loaded jitter", jitterValue, jitterOK, "ms")
 			if direction == "download" {
 				summary.DownLoadedLatencyMs = optionalMetric{Value: latency, Valid: latencyOK}
+				downloadLoadedJitter = optionalMetric{Value: jitterValue, Valid: jitterOK}
 			} else {
 				summary.UpLoadedLatencyMs = optionalMetric{Value: latency, Valid: latencyOK}
+				uploadLoadedJitter = optionalMetric{Value: jitterValue, Valid: jitterOK}
 			}
 		}
 	}
@@ -583,12 +623,35 @@ func runCLIContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			_, _ = fmt.Fprintf(stdout, "%s: N/A\n", score.Name)
 		}
 	}
+	// Fix the measurement outcome before export so the snapshot and report agree.
+	exitCode := 0
 	if ctx.Err() != nil {
+		exitCode = 130
+	} else if failed {
+		exitCode = 1
+	}
+	metricsFailed := false
+	if opts.metricsFile != "" {
+		snapshot := metricsSnapshot{
+			Summary: summary, Download: opts.download, Upload: opts.upload,
+			LoadedLatency: opts.loadedLatency, PacketLoss: opts.packetLoss,
+			DownloadLoadedJitterMs: downloadLoadedJitter, UploadLoadedJitterMs: uploadLoadedJitter,
+			ExitCode: exitCode, CompletedAt: time.Now(),
+		}
+		if err := writeMetricsFile(opts.metricsFile, snapshot); err != nil {
+			metricsFailed = true
+			ui.warning("Prometheus metrics export failed: %v", err)
+		}
+	}
+	if exitCode == 130 {
 		ui.warning("measurement canceled: %v", ctx.Err())
 		return 130
 	}
-	if failed {
+	if exitCode == 1 {
 		ui.warning("measurement incomplete; unavailable values are shown as N/A")
+		return 1
+	}
+	if metricsFailed {
 		return 1
 	}
 	ui.heading("Test complete.")
